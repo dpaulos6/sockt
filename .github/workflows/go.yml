@@ -1,0 +1,34 @@
+name: Go checks
+on:
+  push:
+  pull_request:
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: sockt_test
+          POSTGRES_USER: sockt_test
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sockt_test -d sockt_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      SOCKT_TEST_DATABASE_URL: postgres://sockt_test:ci-only-password@127.0.0.1:5432/sockt_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go mod tidy
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - run: go build ./...

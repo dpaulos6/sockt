@@ -1,0 +1,28 @@
+[Unit]
+Description=Sockt WebSocket chat server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=sockt
+Group=sockt
+WorkingDirectory=/var/lib/sockt
+EnvironmentFile=/etc/sockt/socktd.env
+ExecStart=/opt/sockt/socktd serve
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sockt
+UMask=0077
+# Prevent unnecessary device and kernel privileges.
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

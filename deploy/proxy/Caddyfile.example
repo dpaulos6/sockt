@@ -1,0 +1,11 @@
+# Dedicated subdomain; your existing Next.js domain/site remains independent.
+# Caddy automatically obtains/renews HTTPS certificates after DNS is ready.
+chat.yourdomain.com {
+    @sockt path /ws
+    handle @sockt {
+        reverse_proxy 127.0.0.1:8080
+    }
+    handle {
+        respond "Not found" 404
+    }
+}

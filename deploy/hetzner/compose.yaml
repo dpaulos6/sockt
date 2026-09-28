@@ -1,0 +1,20 @@
+# Run only on your trusted Hetzner server. The database is loopback-only.
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sockt
+      POSTGRES_USER: sockt_app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a unique database password}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - sockt_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sockt_app -d sockt"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  sockt_db:

@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+/data/*
+!/data/.gitkeep
+/dist/
+*.exe
+*.test
+*.out
+/.vscode/
