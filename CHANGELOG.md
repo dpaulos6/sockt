@@ -1,3 +1,9 @@
+## v0.9.2 — Windows updater restart reliability
+
+- Restart the client in its existing PowerShell or Windows Terminal console after an update.
+- Open Windows console input and output read/write so Bubble Tea v2 can enable raw input mode.
+- v0.9.2 also recovers when the v0.9.1 updater supplied a read-only console input handle.
+
 ## v0.9.0 — Accounts and recovery
 
 - One-time, hash-stored recovery codes shown only once on registration/rotation.

@@ -33,8 +33,10 @@ func main() {
 				time.Sleep(8 * time.Second)
 				os.Exit(1)
 			}
-			// Go's nil stdio defaults to NUL. Explicitly attach the restarted
-			// TUI to THIS helper's newly allocated Windows console.
+			// Bubble Tea v2 changes console input mode. Open both handles with
+			// read/write access rather than reusing a possibly read-only stdin.
+			// The helper stays in the caller's console, including ConPTY-backed
+			// Windows Terminal and PowerShell sessions.
 			conIn, inErr := os.OpenFile("CONIN$", os.O_RDWR, 0)
 			conOut, outErr := os.OpenFile("CONOUT$", os.O_RDWR, 0)
 			if inErr != nil || outErr != nil {

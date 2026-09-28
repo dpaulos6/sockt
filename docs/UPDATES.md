@@ -17,9 +17,10 @@ itself, then restarts. **N** cancels. No updates install without consent.
 On Linux it replaces and `exec`s in the same foreground terminal. Windows
 requires the accompanying `sockt-updater.exe` alongside `sockt.exe`: the helper
 waits for the previous executable to exit, installs the staged binary, and
-launches a fresh terminal window. If the app is installed somewhere the current
-user cannot modify, the download fails safely and the old binary stays intact;
-use a user-writable directory or conventional package manager.
+restarts it in the same PowerShell or Windows Terminal session. If the app is
+installed somewhere the current user cannot modify, the download fails safely
+and the old binary stays intact; use a user-writable directory or conventional
+package manager.
 
 The updater does not download from a private GitHub repository or require
 users' GitHub credentials. Host *public binary artifacts only* on the VPS.

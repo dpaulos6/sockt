@@ -2,7 +2,7 @@
 $ErrorActionPreference = "Stop"
 New-Item -ItemType Directory -Force dist | Out-Null
 $releaseKey = $env:SOCKT_UPDATE_PUBLIC_KEY
-$releaseVersion = if ($env:SOCKT_RELEASE_VERSION) { $env:SOCKT_RELEASE_VERSION } else { "0.9.0" }
+$releaseVersion = if ($env:SOCKT_RELEASE_VERSION) { $env:SOCKT_RELEASE_VERSION } else { "0.9.2" }
 $ldflags = "-s -w -X sockt/internal/updater.PublicKeyHex=$releaseKey -X sockt/internal/updater.CurrentVersion=$releaseVersion"
 $env:CGO_ENABLED = "0"
 try {

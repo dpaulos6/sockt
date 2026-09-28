@@ -4,7 +4,7 @@ mkdir -p dist
 # Leave unset for local development; production releases MUST use the stable
 # public key generated once using `sockt-release keygen`.
 release_key="${SOCKT_UPDATE_PUBLIC_KEY:-}"
-release_version="${SOCKT_RELEASE_VERSION:-0.9.0}"
+release_version="${SOCKT_RELEASE_VERSION:-0.9.2}"
 ldflags="-s -w -X sockt/internal/updater.PublicKeyHex=$release_key -X sockt/internal/updater.CurrentVersion=$release_version"
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="$ldflags" -o dist/sockt-windows-amd64.exe ./cmd/sockt
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o dist/sockt-updater-windows-amd64.exe ./cmd/sockt-updater

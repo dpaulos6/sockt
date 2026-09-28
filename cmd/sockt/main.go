@@ -7,7 +7,6 @@ import (
 	"os"
 	"strings"
 
-	tea "charm.land/bubbletea/v2"
 	"golang.org/x/term"
 
 	"sockt/internal/client"
@@ -253,8 +252,14 @@ func main() {
 			return
 		}
 		session := client.New(*addr, c.Username, c.Token, c.LastSeen, store.UpdateSeen)
-		program := tea.NewProgram(tui.New(c.Username, session, *style, *quiet, *addr))
+		program, closeTerminal, terminalErr := newTerminalProgram(tui.New(c.Username, session, *style, *quiet, *addr))
+		if terminalErr != nil {
+			session.Close()
+			fmt.Fprintln(os.Stderr, "Sockt UI:", terminalErr)
+			os.Exit(1)
+		}
 		final, runErr := program.Run()
+		closeTerminal()
 		session.Close()
 		if runErr != nil {
 			fmt.Fprintln(os.Stderr, "Sockt UI:", runErr)

@@ -26,7 +26,7 @@ import (
 // Inject PublicKeyHex when building distributable clients using -ldflags.
 // Development builds deliberately disable auto-updates if no key is supplied.
 var PublicKeyHex = ""
-var CurrentVersion = "0.9.0"
+var CurrentVersion = "0.9.2"
 
 const MaxManifestBytes = 32 * 1024
 const MaxBinaryBytes int64 = 100 << 20
