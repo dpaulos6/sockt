@@ -44,6 +44,9 @@ type Model struct {
 	quiet                 bool
 	help                  bool
 	accountRequested      bool
+	slashSelection        int
+	slashDismissed        bool
+	manualUpdateCheck     bool
 	updateServer          string
 	updateOffer           *updater.Offer
 	updateStage           string
@@ -146,9 +149,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, updateTick()
 	case updateCheckMsg:
-		// Update availability never blocks login or normal messaging.
+		// Background checks do not interrupt chat. Explicit /update requests
+		// display a result even when the installed version is current.
 		if msg.err == nil && m.updateStage == "" {
 			m.updateOffer = msg.offer
+		}
+		if m.manualUpdateCheck {
+			m.manualUpdateCheck = false
+			switch {
+			case msg.err != nil:
+				m.status = "Update check failed: " + msg.err.Error()
+			case msg.offer == nil:
+				m.status = "Sockt v" + updater.CurrentVersion + " is up to date"
+			default:
+				m.status = "Update v" + msg.offer.Version + " available · F2 to install"
+			}
 		}
 		return m, nil
 	case updateDownloadMsg:
@@ -222,7 +237,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Do not take input that suggests a chat send during an update.
 			return m, nil
 		}
+		matches, slashOpen := m.slashMenu()
 		switch msg.String() {
+		case "esc":
+			if slashOpen {
+				m.slashDismissed = true
+				return m, nil
+			}
+		case "up", "down":
+			if slashOpen && len(matches) > 0 {
+				if msg.String() == "down" {
+					m.slashSelection = (m.slashSelection + 1) % len(matches)
+				} else {
+					m.slashSelection = (m.slashSelection - 1 + len(matches)) % len(matches)
+				}
+				return m, nil
+			}
+		case "tab":
+			if slashOpen && len(matches) > 0 {
+				m.composer.SetValue(matches[m.slashSelection].Name)
+				m.slashDismissed = true
+				m.status = "Press Enter to run " + matches[m.slashSelection].Name
+				return m, nil
+			}
 		case "f2":
 			if m.updateOffer != nil {
 				m.updateStage = "confirm"
@@ -248,16 +285,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if text == "" {
 				return m, nil
 			}
-			if text == "/exit" {
-				return m, tea.Quit
+			// First Enter on an incomplete slash command completes it; the
+			// second Enter executes. An exact command executes immediately.
+			if slashOpen && len(matches) > 0 && !strings.EqualFold(text, matches[m.slashSelection].Name) {
+				m.composer.SetValue(matches[m.slashSelection].Name)
+				m.slashDismissed = true
+				m.status = "Press Enter to run " + matches[m.slashSelection].Name
+				return m, nil
 			}
-			if text == "/account" {
+			switch strings.ToLower(text) {
+			case "/exit":
+				return m, tea.Quit
+			case "/account":
 				m.accountRequested = true
 				return m, tea.Quit
-			}
-			if text == "/help" {
+			case "/help":
 				m.help = true
 				m.composer.SetValue("")
+				m.slashDismissed = false
+				m.status = ""
+				return m, nil
+			case "/update":
+				m.composer.SetValue("")
+				m.slashDismissed = false
+				if m.updateOffer != nil {
+					m.updateStage = "confirm"
+				} else if updater.PublicKeyHex == "" {
+					m.status = "This development build has no release verification key"
+				} else {
+					m.manualUpdateCheck = true
+					m.status = "Checking for updates…"
+					return m, checkForUpdate(m.updateServer)
+				}
+				return m, nil
+			}
+			if hasSlashPrefix(text) {
+				// Never leak misspelled or unsupported commands into chat.
+				m.slashDismissed = true
+				m.status = "Unknown command. Type / to see available commands."
 				return m, nil
 			}
 			if !m.online {
@@ -280,11 +345,58 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	if m.online {
+		before := m.composer.Value()
 		m.composer, cmd = m.composer.Update(msg)
+		if m.composer.Value() != before {
+			m.slashSelection = 0
+			m.slashDismissed = false
+		}
 	}
 	return m, cmd
 }
-func (m Model) bodyHeight() int { return max(3, m.height-5) }
+
+// slashMenu keeps suggestion navigation separate from the text-input cursor.
+func (m Model) slashMenu() ([]slashCommand, bool) {
+	if m.slashDismissed {
+		return nil, false
+	}
+	return slashCandidates(m.composer.Value())
+}
+
+// Leave at least two chat lines visible even in a short terminal. Rows are
+// capped so the composer/footer remain anchored at their existing positions.
+func (m Model) slashMenuRows(width int) []string {
+	matches, open := m.slashMenu()
+	if !open {
+		return nil
+	}
+	limit := min(5, max(1, m.height-7))
+	if len(matches) == 0 {
+		return []string{errorStyle.Render(trimCells("No matching commands · Enter shows an error", width))}
+	}
+	rows := make([]string, 0, limit)
+	if limit > len(matches) {
+		rows = append(rows, labelStyle.Render(trimCells("COMMANDS · ↑↓ select · Tab complete", width)))
+	}
+	slots := limit - len(rows)
+	start := 0
+	if m.slashSelection >= slots {
+		start = m.slashSelection - slots + 1
+	}
+	for i := start; i < len(matches) && len(rows) < limit; i++ {
+		command := matches[i]
+		entry := fmt.Sprintf("  %-10s %s", command.Name, command.Description)
+		if i == m.slashSelection {
+			entry = fmt.Sprintf("❯ %-10s %s", command.Name, command.Description)
+			rows = append(rows, brandStyle.Render(trimCells(entry, width)))
+		} else {
+			rows = append(rows, labelStyle.Render(trimCells(entry, width)))
+		}
+	}
+	return rows
+}
+
+func (m Model) bodyHeight() int { return max(2, m.height-5-len(m.slashMenuRows(m.width))) }
 func (m Model) header() string {
 	channel := "general"
 	if m.style == "classic" {
@@ -309,6 +421,12 @@ func (m Model) footer() string {
 		return brandStyle.Render(trimCells("Install v"+m.updateOffer.Version+" and restart now? Y/N", m.width))
 	case "downloading":
 		return brandStyle.Render(trimCells("Downloading and verifying update…", m.width))
+	}
+	if matches, open := m.slashMenu(); open {
+		if len(matches) == 0 {
+			return labelStyle.Render(trimCells("Unknown prefix · Esc dismiss · Enter show error", m.width))
+		}
+		return labelStyle.Render(trimCells("↑↓ select · Tab complete · Enter run · Esc dismiss", m.width))
 	}
 	hint := "Enter send · F1 help · Ctrl+P account · PgUp/PgDn · Ctrl+C quit"
 	if m.width < 61 {
@@ -344,9 +462,9 @@ func (m Model) View() tea.View {
 	separator := lineStyle.Render(strings.Repeat("─", width))
 	rows := m.chatRows(width)
 	if m.help {
-		rows = append(rows, "", brandStyle.Render("Keyboard shortcuts"), labelStyle.Render("Enter   send message"), labelStyle.Render("PgUp    older messages"), labelStyle.Render("PgDn    newer messages"), labelStyle.Render("F1      close help"), labelStyle.Render("F2      install available update"), labelStyle.Render("Ctrl+P  account management"), labelStyle.Render("/account account management"), labelStyle.Render("/exit   leave Sockt"))
+		rows = append(rows, "", brandStyle.Render("Keyboard shortcuts"), labelStyle.Render("Enter   send message"), labelStyle.Render("PgUp    older messages"), labelStyle.Render("PgDn    newer messages"), labelStyle.Render("F1      close help"), labelStyle.Render("F2      install available update"), labelStyle.Render("Ctrl+P  account management"), labelStyle.Render("/       command suggestions"), labelStyle.Render("Tab     complete command"), labelStyle.Render("/update check for updates"), labelStyle.Render("/account account management"), labelStyle.Render("/exit   leave Sockt"))
 	}
-	h := max(3, height-5)
+	h := m.bodyHeight()
 	end := max(0, len(rows)-m.scroll)
 	start := max(0, end-h)
 	visible := rows[start:end]
@@ -355,7 +473,12 @@ func (m Model) View() tea.View {
 		body = append(body, "")
 	}
 	body = append(body, visible...)
-	content := m.header() + "\n" + separator + "\n" + strings.Join(body, "\n") + "\n" + separator + "\n" + m.composer.View() + "\n" + m.footer()
+	menu := m.slashMenuRows(width)
+	content := m.header() + "\n" + separator + "\n" + strings.Join(body, "\n")
+	if len(menu) > 0 {
+		content += "\n" + strings.Join(menu, "\n")
+	}
+	content += "\n" + separator + "\n" + m.composer.View() + "\n" + m.footer()
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.WindowTitle = "Sockt · general"

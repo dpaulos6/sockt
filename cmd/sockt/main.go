@@ -151,7 +151,11 @@ func usage() {
   sockt recover       Recover your account with a one-use code
   sockt account       Manage password, devices, and recovery codes
   sockt logout        Revoke this device's session
+  /                   Show and filter in-chat slash commands
   /account or Ctrl+P  Open account management from the chat UI
+  /update             Check for a signed update or install an available one
+  /help               Show in-chat keyboard shortcuts
+  /exit               Leave the chat
   F2                  Install a verified update if available
   sockt version       Print version
 
