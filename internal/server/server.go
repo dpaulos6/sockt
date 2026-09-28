@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -19,10 +21,11 @@ type Server struct {
 	logger          *log.Logger
 	pending         chan struct{}
 	passwordWorkers chan struct{}
+	attempts        *attemptLimiter
 }
 
 func New(store Store, logger *log.Logger) *Server {
-	return &Server{hub: newHub(store, logger), logger: logger, pending: make(chan struct{}, 32), passwordWorkers: make(chan struct{}, 3)}
+	return &Server{hub: newHub(store, logger), logger: logger, pending: make(chan struct{}, 32), passwordWorkers: make(chan struct{}, 3), attempts: newAttemptLimiter()}
 }
 func (s *Server) Shutdown() { s.hub.shutdown() }
 
@@ -56,8 +59,40 @@ func (s *Server) AcceptConnection(conn net.Conn) {
 }
 
 func (s *Server) authorize(conn net.Conn, p protocol.Packet) (database.Identity, bool) {
-	// Password hashing is deliberately concurrency-limited for a small beta.
-	if p.Type == "register" || p.Type == "password_login" {
+	// Normal chat authentication uses the session token, never a password.
+	if p.Type == "login" {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		ident, err := s.hub.store.Authenticate(ctx, p.Username, p.Token)
+		if err != nil {
+			if !errors.Is(err, database.ErrInvalidSession) {
+				s.logger.Printf("login database error: %v", err)
+			}
+			_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "session expired or invalid; run sockt login"})
+			return database.Identity{}, false
+		}
+		return ident, true
+	}
+	valid := map[string]bool{
+		"register": true, "password_login": true, "recover": true,
+		"account_password": true, "account_codes": true,
+		"account_sessions": true, "account_revoke": true, "account_logout": true,
+	}
+	if !valid[p.Type] || !protocol.ValidUsername(p.Username) {
+		_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "invalid account request"})
+		return database.Identity{}, false
+	}
+	if p.DeviceLabel != "" && !protocol.ValidDeviceLabel(p.DeviceLabel) {
+		_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "invalid device name"})
+		return database.Identity{}, false
+	}
+	// Password hashing and one-time recovery operations share a bounded pool.
+	needsWorker := p.Type == "register" || p.Type == "password_login" || p.Type == "recover" || p.Type == "account_password" || p.Type == "account_codes"
+	if needsWorker {
+		if !s.attempts.allow(p.Username) {
+			_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "too many attempts; try again later"})
+			return database.Identity{}, false
+		}
 		select {
 		case s.passwordWorkers <- struct{}{}:
 			defer func() { <-s.passwordWorkers }()
@@ -65,58 +100,79 @@ func (s *Server) authorize(conn net.Conn, p protocol.Packet) (database.Identity,
 			_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "server busy; try again shortly"})
 			return database.Identity{}, false
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		if !protocol.ValidUsername(p.Username) {
-			_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "invalid username"})
-			return database.Identity{}, false
-		}
-		var token string
-		var err error
-		switch p.Type {
-		case "register":
-			token, err = s.hub.store.Register(ctx, p.Username, p.Invite, p.Password)
-		case "password_login":
-			token, err = s.hub.store.PasswordLogin(ctx, p.Username, p.Password)
-		}
-		if err != nil {
-			message := "registration or login failed"
-			if errors.Is(err, database.ErrInvalidCredentials) {
-				message = "invalid username or password"
-			}
-			if errors.Is(err, database.ErrInvalidInvite) {
-				message = "invite invalid, used or for another username"
-			}
-			if errors.Is(err, database.ErrUsernameUnavailable) {
-				message = "username already registered"
-			}
-			if p.Type == "register" && (len(p.Password) < 12 || len(p.Password) > 128) {
-				message = "password must be 12-128 bytes"
-			}
-			if message == "registration or login failed" {
-				s.logger.Printf("account operation failed: %v", err)
-			}
-			_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: message})
-			return database.Identity{}, false
-		}
-		_ = protocol.Write(conn, protocol.Packet{Type: "authenticated", Username: p.Username, Token: token})
-		return database.Identity{}, false // One-shot account handshake; close afterwards.
 	}
-	if p.Type != "login" {
-		_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "expected login, register or password_login"})
-		return database.Identity{}, false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	ident, err := s.hub.store.Authenticate(ctx, p.Username, p.Token)
-	if err != nil {
-		if !errors.Is(err, database.ErrInvalidSession) {
-			s.logger.Printf("login database error: %v", err)
+	var response protocol.Packet
+	var err error
+	switch p.Type {
+	case "register":
+		var codes []string
+		response.Token, codes, err = s.hub.store.Register(ctx, p.Username, p.Invite, p.Password, p.DeviceLabel)
+		response.RecoveryCodes = codes
+		response.Type = "authenticated"
+	case "password_login":
+		response.Token, err = s.hub.store.PasswordLoginDevice(ctx, p.Username, p.Password, p.DeviceLabel)
+		response.Type = "authenticated"
+	case "recover":
+		response.Token, response.RecoveryCodes, err = s.hub.store.RecoverPassword(ctx, p.Username, p.RecoveryCode, p.NewPassword, p.DeviceLabel)
+		response.Type = "authenticated"
+	case "account_password":
+		response.Token, err = s.hub.store.ChangePassword(ctx, p.Username, p.Token, p.Password, p.NewPassword, p.DeviceLabel)
+		response.Type = "authenticated"
+	case "account_codes":
+		response.RecoveryCodes, err = s.hub.store.GenerateRecoveryCodes(ctx, p.Username, p.Token, p.Password)
+		response.Type = "recovery_codes"
+	case "account_sessions":
+		response.Sessions, err = s.hub.store.ListSessions(ctx, p.Username, p.Token)
+		response.Type = "sessions"
+	case "account_revoke":
+		var revoked bool
+		revoked, err = s.hub.store.RevokeSession(ctx, p.Username, p.Token, p.SessionID)
+		if err == nil && revoked {
+			s.hub.evictSession(p.Username, p.SessionID)
 		}
-		_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "session expired or invalid; run sockt login"})
+		response.Type = "ok"
+	case "account_logout":
+		err = s.hub.store.Logout(ctx, p.Username, p.Token)
+		if err == nil {
+			hash := sha256.Sum256([]byte(p.Token))
+			s.hub.evictSession(p.Username, hex.EncodeToString(hash[:]))
+		}
+		response.Type = "ok"
+	}
+	if err != nil {
+		message := "account operation failed"
+		switch {
+		case errors.Is(err, database.ErrInvalidCredentials):
+			message = "invalid username or password"
+		case errors.Is(err, database.ErrInvalidInvite):
+			message = "invite invalid, used or for another username"
+		case errors.Is(err, database.ErrInvalidSession):
+			message = "session expired or invalid; run sockt login"
+		case errors.Is(err, database.ErrInvalidRecoveryCode):
+			message = "invalid or already used recovery code"
+		case errors.Is(err, database.ErrUsernameUnavailable):
+			message = "username already registered"
+		case p.Type == "register" && (len(p.Password) < 12 || len(p.Password) > 128):
+			message = "password must be 12-128 bytes"
+		case (p.Type == "recover" || p.Type == "account_password") && (len(p.NewPassword) < 12 || len(p.NewPassword) > 128):
+			message = "new password must be 12-128 bytes"
+		default:
+			s.logger.Printf("account operation failed: %v", err)
+		}
+		_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: message})
 		return database.Identity{}, false
 	}
-	return ident, true
+	if needsWorker {
+		s.attempts.reset(p.Username)
+	}
+	if p.Type == "account_password" || p.Type == "recover" {
+		s.hub.evictUser(p.Username)
+	}
+	_ = protocol.Write(conn, response)
+	// The account connection closes after one response; it never joins chat.
+	return database.Identity{}, false
 }
 func (s *Server) handleClient(conn net.Conn) {
 	defer conn.Close()
@@ -137,7 +193,8 @@ func (s *Server) handleClient(conn net.Conn) {
 	if !valid {
 		return
 	}
-	c := &peer{identity: ident, key: strings.ToLower(ident.Username), conn: conn, outgoing: make(chan protocol.Packet, 256)}
+	digest := sha256.Sum256([]byte(login.Token))
+	c := &peer{identity: ident, key: strings.ToLower(ident.Username), tokenHash: hex.EncodeToString(digest[:]), conn: conn, outgoing: make(chan protocol.Packet, 256)}
 	history, lastID, err := s.hub.register(c, login.SinceID)
 	if err != nil {
 		_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "could not join room: " + err.Error()})
@@ -173,6 +230,15 @@ func (s *Server) handleClient(conn net.Conn) {
 				s.logger.Printf("read user=%q: %v", ident.Username, readErr)
 			}
 			return
+		}
+		if packet.Type == "ping" || packet.Type == "chat" {
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			_, authErr := s.hub.store.Authenticate(ctx, ident.Username, login.Token)
+			cancel()
+			if authErr != nil {
+				// The dedicated writer owns this connection now; closing it forces a clean re-login.
+				return
+			}
 		}
 		switch packet.Type {
 		case "ping":

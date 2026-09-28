@@ -1,0 +1,118 @@
+// sockt-release creates offline Ed25519 keys and signs static release manifests.
+// Store the private seed OUTSIDE the source tree, CI logs, and web root.
+package main
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"sockt/internal/updater"
+)
+
+func fail(err error) { fmt.Fprintln(os.Stderr, err); os.Exit(1) }
+func main() {
+	if len(os.Args) < 2 {
+		fail(fmt.Errorf("usage: sockt-release keygen -out PRIVATE_KEY_FILE | sign -key PRIVATE_KEY_FILE -version 0.X.Y -base-url https://chat.dpaulos.pt/updates -dist dist -out dist/stable.json"))
+	}
+	switch os.Args[1] {
+	case "keygen":
+		flags := flag.NewFlagSet("keygen", flag.ExitOnError)
+		out := flags.String("out", "", "path outside repository for release signing key")
+		_ = flags.Parse(os.Args[2:])
+		if *out == "" {
+			fail(fmt.Errorf("-out is required"))
+		}
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			fail(err)
+		}
+		f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			fail(err)
+		}
+		if _, err = fmt.Fprintln(f, hex.EncodeToString(priv.Seed())); err != nil {
+			_ = f.Close()
+			fail(err)
+		}
+		if err = f.Close(); err != nil {
+			fail(err)
+		}
+		fmt.Println("Release PUBLIC key (safe to distribute):", hex.EncodeToString(pub))
+		fmt.Println("Protect the private key; never place it in the repository or on the public VPS.")
+	case "sign":
+		flags := flag.NewFlagSet("sign", flag.ExitOnError)
+		key := flags.String("key", "", "private signing key file")
+		ver := flags.String("version", "", "release version (e.g. 0.8.1)")
+		base := flags.String("base-url", "https://chat.dpaulos.pt/updates", "HTTPS release files directory")
+		dist := flags.String("dist", "dist", "directory containing built release binaries")
+		out := flags.String("out", "dist/stable.json", "signed manifest output path")
+		notes := flags.String("notes", "", "short release notes")
+		_ = flags.Parse(os.Args[2:])
+		if *key == "" || *ver == "" {
+			fail(fmt.Errorf("-key and -version are required"))
+		}
+		if _, err := updater.VersionParts(*ver); err != nil {
+			fail(err)
+		}
+		*ver = strings.TrimPrefix(*ver, "v")
+		u, err := url.Parse(*base)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+			fail(fmt.Errorf("base URL must be HTTPS without credentials"))
+		}
+		b, err := os.ReadFile(*key)
+		if err != nil {
+			fail(err)
+		}
+		seed, err := hex.DecodeString(strings.TrimSpace(string(b)))
+		if err != nil || len(seed) != ed25519.SeedSize {
+			fail(fmt.Errorf("invalid signing key"))
+		}
+		priv := ed25519.NewKeyFromSeed(seed)
+		m := updater.Manifest{Version: *ver, Notes: *notes, Artifacts: map[string]updater.Asset{}}
+		for _, a := range []struct{ platform, file string }{
+			{"windows/amd64", "sockt-windows-amd64.exe"},
+			{"linux/amd64", "sockt-linux-amd64"},
+			{"linux/arm64", "sockt-linux-arm64"},
+		} {
+			f, err := os.Open(filepath.Join(*dist, a.file))
+			if err != nil {
+				fail(fmt.Errorf("missing %s: %w", a.file, err))
+			}
+			h := sha256.New()
+			_, err = io.Copy(h, f)
+			_ = f.Close()
+			if err != nil {
+				fail(err)
+			}
+			m.Artifacts[a.platform] = updater.Asset{
+				URL:    strings.TrimRight(*base, "/") + "/" + fmt.Sprintf("sockt-v%s-%s", *ver, a.file),
+				SHA256: hex.EncodeToString(h.Sum(nil)),
+			}
+		}
+		canonical, err := updater.SigningBytes(m)
+		if err != nil {
+			fail(err)
+		}
+		m.Signature = hex.EncodeToString(ed25519.Sign(priv, canonical))
+		encoded, err := json.MarshalIndent(m, "", "  ")
+		if err != nil {
+			fail(err)
+		}
+		if err = os.WriteFile(*out, append(encoded, '\n'), 0644); err != nil {
+			fail(err)
+		}
+		fmt.Printf("Signed %s for release v%s; upload it only AFTER uploading all binaries.\n", *out, *ver)
+	default:
+		fail(fmt.Errorf("unknown command %q", os.Args[1]))
+	}
+}

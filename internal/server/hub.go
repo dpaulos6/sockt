@@ -18,28 +18,36 @@ const maxOnline = 32
 
 type Store interface {
 	Authenticate(context.Context, string, string) (database.Identity, error)
-	Register(context.Context, string, string, string) (string, error)
+	Register(context.Context, string, string, string, string) (string, []string, error)
+	PasswordLoginDevice(context.Context, string, string, string) (string, error)
+	GenerateRecoveryCodes(context.Context, string, string, string) ([]string, error)
+	ChangePassword(context.Context, string, string, string, string, string) (string, error)
+	RecoverPassword(context.Context, string, string, string, string) (string, []string, error)
+	ListSessions(context.Context, string, string) ([]protocol.SessionInfo, error)
+	RevokeSession(context.Context, string, string, string) (bool, error)
+	Logout(context.Context, string, string) error
 	PasswordLogin(context.Context, string, string) (string, error)
 	History(context.Context, int64) ([]protocol.Message, int64, error)
 	InsertMessage(context.Context, database.Identity, string) (protocol.Message, error)
 }
 
 type peer struct {
-	identity database.Identity
-	key      string
-	conn     net.Conn
-	outgoing chan protocol.Packet
+	identity  database.Identity
+	key       string
+	tokenHash string
+	conn      net.Conn
+	outgoing  chan protocol.Packet
 }
 
 type hub struct {
 	mu      sync.Mutex
-	clients map[string]*peer
+	clients map[*peer]struct{}
 	store   Store
 	logger  *log.Logger
 }
 
 func newHub(store Store, logger *log.Logger) *hub {
-	return &hub{clients: make(map[string]*peer), store: store, logger: logger}
+	return &hub{clients: make(map[*peer]struct{}), store: store, logger: logger}
 }
 func (c *peer) writeLoop(h *hub) {
 	for pkt := range c.outgoing {
@@ -53,17 +61,17 @@ func (c *peer) writeLoop(h *hub) {
 	}
 }
 func (h *hub) detachLocked(c *peer) bool {
-	if h.clients[c.key] != c {
+	if _, ok := h.clients[c]; !ok {
 		return false
 	}
-	delete(h.clients, c.key)
+	delete(h.clients, c)
 	close(c.outgoing)
 	_ = c.conn.Close()
 	h.logger.Printf("disconnect user=%q", c.identity.Username)
 	return true
 }
 func (h *hub) sendLocked(c *peer, p protocol.Packet) {
-	if h.clients[c.key] != c {
+	if _, ok := h.clients[c]; !ok {
 		return
 	}
 	select {
@@ -74,14 +82,18 @@ func (h *hub) sendLocked(c *peer, p protocol.Packet) {
 	}
 }
 func (h *hub) broadcastLocked(p protocol.Packet) {
-	for _, c := range h.clients {
+	for c := range h.clients {
 		h.sendLocked(c, p)
 	}
 }
 func (h *hub) presenceLocked() {
-	users := make([]string, 0, len(h.clients))
-	for _, c := range h.clients {
-		users = append(users, c.identity.Username)
+	unique := make(map[string]string)
+	for c := range h.clients {
+		unique[c.key] = c.identity.Username
+	}
+	users := make([]string, 0, len(unique))
+	for _, name := range unique {
+		users = append(users, name)
 	}
 	sort.Strings(users)
 	h.broadcastLocked(protocol.Packet{Type: "presence", Users: users})
@@ -92,9 +104,6 @@ func (h *hub) presenceLocked() {
 func (h *hub) register(c *peer, since int64) ([]protocol.Message, int64, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if _, exists := h.clients[c.key]; exists {
-		return nil, 0, errors.New("this user is already online")
-	}
 	if len(h.clients) >= maxOnline {
 		return nil, 0, errors.New("room is full")
 	}
@@ -104,7 +113,7 @@ func (h *hub) register(c *peer, since int64) ([]protocol.Message, int64, error) 
 	if err != nil {
 		return nil, 0, err
 	}
-	h.clients[c.key] = c
+	h.clients[c] = struct{}{}
 	h.logger.Printf("connect user=%q remote=%s", c.identity.Username, c.conn.RemoteAddr())
 	h.presenceLocked()
 	return history, lastID, nil
@@ -119,7 +128,7 @@ func (h *hub) leave(c *peer) {
 func (h *hub) shutdown() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, c := range h.clients {
+	for c := range h.clients {
 		h.detachLocked(c)
 	}
 }
@@ -134,7 +143,7 @@ func (h *hub) send(c *peer, p protocol.Packet) {
 func (h *hub) publish(c *peer, text string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.clients[c.key] != c {
+	if _, ok := h.clients[c]; !ok {
 		return errors.New("client is no longer connected")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -146,4 +155,33 @@ func (h *hub) publish(c *peer, text string) error {
 	h.logger.Printf("message id=%d user=%q bytes=%d", m.ID, m.Username, len(m.Text))
 	h.broadcastLocked(protocol.Packet{Type: "message", Message: &m})
 	return nil
+}
+
+// Evict a revoked session immediately in this server process; database
+// validation on each ping/chat also protects against other server processes.
+func (h *hub) evictSession(username, digest string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	changed := false
+	for c := range h.clients {
+		if c.key == strings.ToLower(username) && c.tokenHash == digest {
+			changed = h.detachLocked(c) || changed
+		}
+	}
+	if changed {
+		h.presenceLocked()
+	}
+}
+func (h *hub) evictUser(username string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	changed := false
+	for c := range h.clients {
+		if c.key == strings.ToLower(username) {
+			changed = h.detachLocked(c) || changed
+		}
+	}
+	if changed {
+		h.presenceLocked()
+	}
 }

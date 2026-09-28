@@ -8,6 +8,7 @@ import (
 )
 
 const LocalURL = "ws://127.0.0.1:8080/ws"
+const DefaultRemoteURL = "wss://chat.dpaulos.pt/ws"
 
 // ValidateServerAddress accepts encrypted WebSocket URLs for any public or
 // private host. Plain ws:// is only permitted on the same machine for local

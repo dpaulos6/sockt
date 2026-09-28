@@ -65,7 +65,7 @@ func (s *Store) Close() error { return s.db.Close() }
 // Operators apply reviewed schema changes with `socktd migrate` first.
 func (s *Store) CheckSchema(ctx context.Context) error {
 	var installed bool
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = '001_initial.up.sql')`).Scan(&installed)
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = '002_accounts.up.sql')`).Scan(&installed)
 	if err != nil {
 		return fmt.Errorf("schema not initialized; run socktd migrate: %w", err)
 	}
@@ -206,95 +206,63 @@ func VerifyPassword(encoded, password string) bool {
 	return subtle.ConstantTimeCompare(got, want) == 1
 }
 
-func createSession(ctx context.Context, tx *sql.Tx, id int64) (string, error) {
-	token, hash, err := newToken()
-	if err != nil {
-		return "", err
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO sessions(token_hash,user_id,expires_at)
-        VALUES($1,$2,now()+interval '30 days')`, hash, id)
-	return token, err
-}
-
-// Register consumes exactly one invite inside the same transaction that creates
-// the user, general room membership, and their first session.
-func (s *Store) Register(ctx context.Context, username, invite, password string) (string, error) {
+func (s *Store) Register(ctx context.Context, username, invite, password, label string) (string, []string, error) {
 	if !protocol.ValidUsername(username) || len(invite) != 43 {
-		return "", ErrInvalidInvite
+		return "", nil, ErrInvalidInvite
 	}
 	digest := sha256.Sum256([]byte(invite))
 	pwdHash, err := HashPassword(password)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	defer tx.Rollback()
 	var inviteID int64
 	err = tx.QueryRowContext(ctx, `SELECT id FROM invites WHERE username_key=$1 AND token_hash=$2 AND used_at IS NULL FOR UPDATE`, strings.ToLower(username), digest[:]).Scan(&inviteID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrInvalidInvite
+		return "", nil, ErrInvalidInvite
 	}
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var existing bool
 	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE username_key=$1)`, strings.ToLower(username)).Scan(&existing)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if existing {
-		return "", ErrUsernameUnavailable
+		return "", nil, ErrUsernameUnavailable
 	}
 	var id int64
 	err = tx.QueryRowContext(ctx, `INSERT INTO users(username,username_key,password_hash) VALUES($1,$2,$3) RETURNING id`, username, strings.ToLower(username), pwdHash).Scan(&id)
 	if err != nil {
-		return "", fmt.Errorf("register user (username may be taken): %w", err)
+		return "", nil, fmt.Errorf("register user (username may be taken): %w", err)
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO conversation_members(conversation_id,user_id) VALUES(1,$1)`, id); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE invites SET used_at=now() WHERE id=$1`, inviteID); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	token, err := createSession(ctx, tx, id)
+	codes, err := generateRecoveryCodes(ctx, tx, id)
 	if err != nil {
-		return "", err
+		return "", nil, err
+	}
+	token, err := createLabeledSession(ctx, tx, id, label)
+	if err != nil {
+		return "", nil, err
 	}
 	if err = tx.Commit(); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return token, nil
+	return token, codes, nil
 }
 
 func (s *Store) PasswordLogin(ctx context.Context, username, password string) (string, error) {
-	if !protocol.ValidUsername(username) {
-		return "", ErrInvalidCredentials
-	}
-	var id int64
-	var hash string
-	err := s.db.QueryRowContext(ctx, `SELECT id,password_hash FROM users WHERE username_key=$1`, strings.ToLower(username)).Scan(&id, &hash)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrInvalidCredentials
-	}
-	if err != nil {
-		return "", err
-	}
-	if !VerifyPassword(hash, password) {
-		return "", ErrInvalidCredentials
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback()
-	token, err := createSession(ctx, tx, id)
-	if err != nil {
-		return "", err
-	}
-	return token, tx.Commit()
+	return s.PasswordLoginDevice(ctx, username, password, "Legacy client")
 }
 
 func (s *Store) Authenticate(ctx context.Context, username, session string) (Identity, error) {
@@ -309,6 +277,9 @@ func (s *Store) Authenticate(ctx context.Context, username, session string) (Ide
 		strings.ToLower(username), digest[:]).Scan(&id.ID, &id.Username)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Identity{}, ErrInvalidSession
+	}
+	if err == nil {
+		_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at=now() WHERE token_hash=$1 AND last_seen_at<now()-interval '5 minutes'`, digest[:])
 	}
 	return id, err
 }

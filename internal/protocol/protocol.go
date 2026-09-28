@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -21,6 +22,17 @@ const (
 var validUsername = regexp.MustCompile(`^[A-Za-z0-9_]{1,24}$`)
 
 func ValidUsername(s string) bool { return validUsername.MatchString(s) }
+func ValidDeviceLabel(s string) bool {
+	if len(s) == 0 || len(s) > 64 || strings.TrimSpace(s) == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < 32 || r > 126 {
+			return false
+		}
+	}
+	return true
+}
 
 type Message struct {
 	ID       int64     `json:"id"`
@@ -29,22 +41,40 @@ type Message struct {
 	SentAt   time.Time `json:"sent_at"`
 }
 
-// Handshake: register (username, invite, password), password_login (username, password),
-// login (username, session token, since_id); then chat and ping.
+// Handshake: register/password_login/recover use one-shot account requests.
+// account_sessions, account_revoke, account_logout, account_password and
+// account_codes use a session token, with password re-confirmation where needed.
+// Streaming chat uses login (username, session token, since_id), chat and ping.
 // Server -> client: history (messages), ready, message, presence, pong, error.
+// SessionInfo is public account metadata, never a credential.
+type SessionInfo struct {
+	ID         string    `json:"id"`
+	Device     string    `json:"device"`
+	CreatedAt  time.Time `json:"created_at"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	Current    bool      `json:"current"`
+}
+
 type Packet struct {
-	Version  int       `json:"version,omitempty"`
-	Type     string    `json:"type"`
-	Username string    `json:"username,omitempty"`
-	Invite   string    `json:"invite,omitempty"`
-	Password string    `json:"password,omitempty"`
-	Token    string    `json:"token,omitempty"`
-	Text     string    `json:"text,omitempty"`
-	SinceID  int64     `json:"since_id,omitempty"`
-	LastID   int64     `json:"last_id,omitempty"`
-	Message  *Message  `json:"message,omitempty"`
-	Messages []Message `json:"messages,omitempty"`
-	Users    []string  `json:"users,omitempty"`
+	Version       int           `json:"version,omitempty"`
+	Type          string        `json:"type"`
+	Username      string        `json:"username,omitempty"`
+	Invite        string        `json:"invite,omitempty"`
+	Password      string        `json:"password,omitempty"`
+	NewPassword   string        `json:"new_password,omitempty"`
+	RecoveryCode  string        `json:"recovery_code,omitempty"`
+	RecoveryCodes []string      `json:"recovery_codes,omitempty"`
+	DeviceLabel   string        `json:"device_label,omitempty"`
+	SessionID     string        `json:"session_id,omitempty"`
+	Sessions      []SessionInfo `json:"sessions,omitempty"`
+	Token         string        `json:"token,omitempty"`
+	Text          string        `json:"text,omitempty"`
+	SinceID       int64         `json:"since_id,omitempty"`
+	LastID        int64         `json:"last_id,omitempty"`
+	Message       *Message      `json:"message,omitempty"`
+	Messages      []Message     `json:"messages,omitempty"`
+	Users         []string      `json:"users,omitempty"`
 }
 
 func NewScanner(r io.Reader) *bufio.Scanner {

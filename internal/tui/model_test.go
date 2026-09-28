@@ -1,6 +1,7 @@
 package tui
 
 import (
+	tea "charm.land/bubbletea/v2"
 	"testing"
 	"time"
 
@@ -33,5 +34,16 @@ func TestReconnectHistoryRemainsOrderedAndUnique(t *testing.T) {
 	}
 	if len(m.history) != 3 || m.history[0].ID != 1 || m.history[1].ID != 2 || m.history[2].ID != 3 {
 		t.Fatalf("replayed history was duplicated or misordered: %+v", m.history)
+	}
+}
+
+func TestAccountShortcutRequestsMenu(t *testing.T) {
+	m := Model{width: 80, height: 24}
+	next, _ := m.Update(tea.KeyPressMsg{
+		Code: 'p',
+		Mod:  tea.ModCtrl,
+	})
+	if !next.(Model).AccountRequested() {
+		t.Fatal("Ctrl+P didn't open account management")
 	}
 }

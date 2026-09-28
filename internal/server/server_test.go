@@ -30,12 +30,40 @@ func (s *fakeStore) Authenticate(_ context.Context, name, token string) (databas
 	}
 	return database.Identity{}, database.ErrInvalidSession
 }
-func (s *fakeStore) Register(_ context.Context, user, invite, password string) (string, error) {
+func (s *fakeStore) Register(_ context.Context, user, invite, password, device string) (string, []string, error) {
 	if user != "Paulos" || invite != "invitation" || len(password) < 12 {
-		return "", database.ErrInvalidInvite
+		return "", nil, database.ErrInvalidInvite
 	}
-	return "a-new-session-token", nil
+	return "a-new-session-token", []string{"CODE1", "CODE2", "CODE3", "CODE4", "CODE5", "CODE6", "CODE7", "CODE8"}, nil
 }
+func (s *fakeStore) PasswordLoginDevice(ctx context.Context, user, password, device string) (string, error) {
+	return s.PasswordLogin(ctx, user, password)
+}
+func (s *fakeStore) GenerateRecoveryCodes(_ context.Context, user, token, password string) ([]string, error) {
+	if user != "Paulos" || password != "correctpassword" {
+		return nil, database.ErrInvalidCredentials
+	}
+	return []string{"CODE1", "CODE2", "CODE3", "CODE4", "CODE5", "CODE6", "CODE7", "CODE8"}, nil
+}
+func (s *fakeStore) ChangePassword(_ context.Context, user, token, oldPassword, newPassword, device string) (string, error) {
+	if user != "Paulos" || oldPassword != "correctpassword" {
+		return "", database.ErrInvalidCredentials
+	}
+	return "another-session-token", nil
+}
+func (s *fakeStore) RecoverPassword(_ context.Context, user, code, newPassword, device string) (string, []string, error) {
+	if user != "Paulos" || code != "CODE1" {
+		return "", nil, database.ErrInvalidRecoveryCode
+	}
+	return "another-session-token", []string{"NEW1", "NEW2", "NEW3", "NEW4", "NEW5", "NEW6", "NEW7", "NEW8"}, nil
+}
+func (s *fakeStore) ListSessions(_ context.Context, user, token string) ([]protocol.SessionInfo, error) {
+	return []protocol.SessionInfo{{ID: strings.Repeat("a", 64), Device: "Test PC", Current: true}}, nil
+}
+func (s *fakeStore) RevokeSession(_ context.Context, user, token, target string) (bool, error) {
+	return true, nil
+}
+func (s *fakeStore) Logout(_ context.Context, user, token string) error { return nil }
 func (s *fakeStore) PasswordLogin(_ context.Context, user, password string) (string, error) {
 	if user != "Paulos" || password != "correctpassword" {
 		return "", database.ErrInvalidCredentials
@@ -225,6 +253,56 @@ func TestRegistrationAndPasswordLoginHandshake(t *testing.T) {
 		c.Close()
 		if err != nil || response.Type != "authenticated" || response.Token == "" {
 			t.Fatalf("handshake failed %s: %+v %v", p.Type, response, err)
+		}
+	}
+}
+
+func TestOneAccountCanConnectFromTwoDevices(t *testing.T) {
+	addr, stop := launch(t, &fakeStore{})
+	defer stop()
+	first, _ := connect(t, addr, "Paulos", "a-token")
+	second, _ := connect(t, addr, "Paulos", "a-token")
+	if err := protocol.Write(first.conn, protocol.Packet{Type: "chat", Text: "two devices"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range []*wire{first, second} {
+		p := readType(t, w, "message")
+		if p.Message == nil || p.Message.Text != "two devices" {
+			t.Fatalf("device did not receive message: %+v", p)
+		}
+	}
+}
+
+func TestAccountOperationsUseOneShotConnections(t *testing.T) {
+	addr, stop := launch(t, &fakeStore{})
+	defer stop()
+	cases := []struct {
+		request protocol.Packet
+		expect  string
+	}{
+		{protocol.Packet{Type: "register", Username: "Paulos", Password: "correctpassword", Invite: "invitation", DeviceLabel: "Windows PC"}, "authenticated"},
+		{protocol.Packet{Type: "password_login", Username: "Paulos", Password: "correctpassword", DeviceLabel: "Linux device"}, "authenticated"},
+		{protocol.Packet{Type: "account_sessions", Username: "Paulos", Token: "a-token"}, "sessions"},
+		{protocol.Packet{Type: "account_codes", Username: "Paulos", Token: "a-token", Password: "correctpassword"}, "recovery_codes"},
+		{protocol.Packet{Type: "recover", Username: "Paulos", RecoveryCode: "CODE1", NewPassword: "next-password-123", DeviceLabel: "Windows PC"}, "authenticated"},
+	}
+	for _, tt := range cases {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tt.request.Version = protocol.Version
+		if err = protocol.Write(c, tt.request); err != nil {
+			t.Fatal(err)
+		}
+		_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		p, err := protocol.Read(protocol.NewScanner(c))
+		c.Close()
+		if err != nil || p.Type != tt.expect {
+			t.Fatalf("operation %s: %+v %v", tt.request.Type, p, err)
+		}
+		if p.Type == "recovery_codes" && len(p.RecoveryCodes) != 8 {
+			t.Fatal("missing recovery codes")
 		}
 	}
 }

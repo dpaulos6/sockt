@@ -3,9 +3,14 @@
 package tui
 
 import (
+	"context"
 	"fmt"
+	"net/http"
+	"os"
+	"sockt/internal/updater"
 	"sort"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -38,9 +43,14 @@ type Model struct {
 	style                 string
 	quiet                 bool
 	help                  bool
+	accountRequested      bool
+	updateServer          string
+	updateOffer           *updater.Offer
+	updateStage           string
+	updateStagedPath      string
 }
 
-func New(username string, conn *client.Client, style string, quiet bool) Model {
+func New(username string, conn *client.Client, style string, quiet bool, serverURL string) Model {
 	composer := textinput.New()
 	composer.Prompt = "> "
 	composer.Placeholder = "Write a message…"
@@ -48,7 +58,7 @@ func New(username string, conn *client.Client, style string, quiet bool) Model {
 	composer.SetVirtualCursor(false)
 	composer.SetWidth(74)
 	composer.Focus()
-	return Model{username: username, connection: conn, events: conn.Incoming(), composer: composer, status: "Connecting…", width: 80, height: 24, style: style, quiet: quiet}
+	return Model{username: username, connection: conn, events: conn.Incoming(), composer: composer, status: "Connecting…", width: 80, height: 24, style: style, quiet: quiet, updateServer: serverURL}
 }
 
 type closedMsg struct{}
@@ -62,7 +72,53 @@ func waitForNetwork(events <-chan client.Event) tea.Cmd {
 		return e
 	}
 }
-func (m Model) Init() tea.Cmd { return waitForNetwork(m.events) }
+
+type updateCheckMsg struct {
+	offer *updater.Offer
+	err   error
+}
+type updateTickMsg struct{}
+type updateDownloadMsg struct {
+	path string
+	err  error
+}
+
+func checkForUpdate(server string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		offer, err := updater.Check(ctx, server, updater.CurrentVersion, updater.PublicKeyHex, nil)
+		return updateCheckMsg{offer: offer, err: err}
+	}
+}
+func updateTick() tea.Cmd {
+	return tea.Tick(30*time.Minute, func(time.Time) tea.Msg { return updateTickMsg{} })
+}
+func downloadUpdate(offer updater.Offer) tea.Cmd {
+	return func() tea.Msg {
+		path, err := os.Executable()
+		if err != nil {
+			return updateDownloadMsg{err: err}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		staged, err := updater.Download(ctx, offer, path, &http.Client{Timeout: 3 * time.Minute})
+		return updateDownloadMsg{path: staged, err: err}
+	}
+}
+
+// UpgradePath is nonempty only after a verified update was staged and the TUI
+// voluntarily exited. The CLI installs and restarts outside alternate screen.
+func (m Model) UpgradePath() string    { return m.updateStagedPath }
+func (m Model) AccountRequested() bool { return m.accountRequested }
+
+func (m Model) Init() tea.Cmd {
+	cmds := []tea.Cmd{waitForNetwork(m.events)}
+	if updater.PublicKeyHex != "" {
+		cmds = append(cmds, checkForUpdate(m.updateServer), updateTick())
+	}
+	return tea.Batch(cmds...)
+}
 func (m *Model) addMessage(msg protocol.Message) {
 	if msg.ID <= 0 {
 		return
@@ -84,6 +140,26 @@ func (m *Model) addMessage(msg protocol.Message) {
 }
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case updateTickMsg:
+		if m.updateStage == "" {
+			return m, tea.Batch(checkForUpdate(m.updateServer), updateTick())
+		}
+		return m, updateTick()
+	case updateCheckMsg:
+		// Update availability never blocks login or normal messaging.
+		if msg.err == nil && m.updateStage == "" {
+			m.updateOffer = msg.offer
+		}
+		return m, nil
+	case updateDownloadMsg:
+		if msg.err != nil {
+			m.updateStage = ""
+			m.status = "Update failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.updateStagedPath = msg.path
+		m.updateStage = "ready"
+		return m, tea.Quit
 	case tea.WindowSizeMsg:
 		m.width = max(20, msg.Width)
 		m.height = max(8, msg.Height)
@@ -130,8 +206,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, waitForNetwork(m.events)
 	case tea.KeyPressMsg:
+		if m.updateStage == "confirm" {
+			switch strings.ToLower(msg.String()) {
+			case "y", "enter":
+				m.updateStage = "downloading"
+				m.status = "Downloading and verifying Sockt " + m.updateOffer.Version + "…"
+				return m, downloadUpdate(*m.updateOffer)
+			case "n", "esc":
+				m.updateStage = ""
+				return m, nil
+			}
+			return m, nil
+		}
+		if m.updateStage == "downloading" {
+			// Do not take input that suggests a chat send during an update.
+			return m, nil
+		}
 		switch msg.String() {
+		case "f2":
+			if m.updateOffer != nil {
+				m.updateStage = "confirm"
+			}
+			return m, nil
 		case "ctrl+c":
+			return m, tea.Quit
+		case "ctrl+p":
+			m.accountRequested = true
 			return m, tea.Quit
 		case "f1":
 			m.help = !m.help
@@ -149,6 +249,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if text == "/exit" {
+				return m, tea.Quit
+			}
+			if text == "/account" {
+				m.accountRequested = true
 				return m, tea.Quit
 			}
 			if text == "/help" {
@@ -188,6 +292,9 @@ func (m Model) header() string {
 	}
 	left := brandStyle.Render("sockt") + labelStyle.Render("  "+channel)
 	right := labelStyle.Render(fmt.Sprintf("%d online", m.members))
+	if m.updateOffer != nil {
+		right = brandStyle.Render("↑ v"+m.updateOffer.Version) + labelStyle.Render(fmt.Sprintf(" · %d online", m.members))
+	}
 	if !m.online {
 		right = errorStyle.Render("offline")
 	}
@@ -197,17 +304,26 @@ func (m Model) header() string {
 	return left + strings.Repeat(" ", m.width-lipgloss.Width(left)-lipgloss.Width(right)) + right
 }
 func (m Model) footer() string {
-	hint := "Enter send · F1 help · PgUp/PgDn scroll · Ctrl+C quit"
+	switch m.updateStage {
+	case "confirm":
+		return brandStyle.Render(trimCells("Install v"+m.updateOffer.Version+" and restart now? Y/N", m.width))
+	case "downloading":
+		return brandStyle.Render(trimCells("Downloading and verifying update…", m.width))
+	}
+	hint := "Enter send · F1 help · Ctrl+P account · PgUp/PgDn · Ctrl+C quit"
 	if m.width < 61 {
-		hint = "Enter send · F1 help · Ctrl+C quit"
+		hint = "Enter send · F1 help · Ctrl+P account · Ctrl+C quit"
 	}
 	if m.width < 42 {
-		hint = "F1 help · Ctrl+C quit"
+		hint = "F1 help · Ctrl+P account · Ctrl+C quit"
 	}
 	// Only draw extra status when it conveys something beyond ordinary uptime.
 	if m.status != "Connected" && m.status != "" {
 		short := trimCells(m.status, m.width)
 		return labelStyle.Render(short)
+	}
+	if m.updateOffer != nil {
+		return brandStyle.Render(trimCells("Update v"+m.updateOffer.Version+" available · F2 install & restart", m.width))
 	}
 	return labelStyle.Render(trimCells(hint, m.width))
 }
@@ -228,7 +344,7 @@ func (m Model) View() tea.View {
 	separator := lineStyle.Render(strings.Repeat("─", width))
 	rows := m.chatRows(width)
 	if m.help {
-		rows = append(rows, "", brandStyle.Render("Keyboard shortcuts"), labelStyle.Render("Enter   send message"), labelStyle.Render("PgUp    older messages"), labelStyle.Render("PgDn    newer messages"), labelStyle.Render("F1      close help"), labelStyle.Render("/exit   leave Sockt"))
+		rows = append(rows, "", brandStyle.Render("Keyboard shortcuts"), labelStyle.Render("Enter   send message"), labelStyle.Render("PgUp    older messages"), labelStyle.Render("PgDn    newer messages"), labelStyle.Render("F1      close help"), labelStyle.Render("F2      install available update"), labelStyle.Render("Ctrl+P  account management"), labelStyle.Render("/account account management"), labelStyle.Render("/exit   leave Sockt"))
 	}
 	h := max(3, height-5)
 	end := max(0, len(rows)-m.scroll)

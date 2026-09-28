@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"sockt/internal/protocol"
+	"testing"
+)
 
 func TestWebSocketURLSafety(t *testing.T) {
 	valid := []string{
@@ -20,6 +23,19 @@ func TestWebSocketURLSafety(t *testing.T) {
 	for _, u := range invalid {
 		if err := ValidateServerAddress(u); err == nil {
 			t.Errorf("reject %s", u)
+		}
+	}
+}
+
+func TestDeviceLabelSafety(t *testing.T) {
+	for _, s := range []string{"Windows PC", "Home laptop", "Test Device 1"} {
+		if !protocol.ValidDeviceLabel(s) {
+			t.Fatalf("valid label rejected: %q", s)
+		}
+	}
+	for _, s := range []string{"", " ", "line\nbreak", "\x1b[32m", "café"} {
+		if protocol.ValidDeviceLabel(s) {
+			t.Fatalf("invalid label accepted: %q", s)
 		}
 	}
 }

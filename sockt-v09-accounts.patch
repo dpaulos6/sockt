@@ -1,0 +1,2506 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index a96cf12..8cbf580 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,3 +1,15 @@
++## v0.9.0 — Accounts and recovery
++
++- One-time, hash-stored recovery codes shown only once on registration/rotation.
++- Username + recovery-code password reset revokes all prior device sessions.
++- Self-service password changes, log out, list/revoke active devices.
++- Multiple simultaneous chat sessions for the same account (unique-user presence).
++- New `sockt account`, `sockt recover`, `sockt logout` and `/account` / Ctrl+P.
++- Additive Neon PostgreSQL migration; optional email columns reserved, no SMTP.
++- Per-username password/recovery attempt limits; active-session revocation.
++- Defaults for new client installations use wss://chat.dpaulos.pt/ws.
++- v0.8's signed client updater remains in place; reuse signing key for releases.
++
+ ## v0.8 — Signed in-app client updates
+ 
+ - Optional signed client update checks at startup and every 30 minutes via the current WSS host.
+diff --git a/README.md b/README.md
+index c6ef39c..ed10f83 100644
+--- a/README.md
++++ b/README.md
+@@ -1,96 +1,89 @@
+-# Sockt v0.8 — terminal messaging with signed in-app client updates
++# Sockt v0.9 — invitation-only terminal messenger
++
++Sockt is a compact Go/Bubble Tea terminal chat app. The Go server runs behind a
++trusted HTTPS reverse proxy, accepts authenticated WebSocket connections and
++stores accounts, sessions and messages in PostgreSQL. v0.9 adds self-service
++account recovery and management while keeping the app **invitation-only**, with
++**no mandatory email**.
++
++## New in v0.9
++
++- New users register with a username-specific one-time invitation and password.
++  Registration creates **eight single-use recovery codes** to store privately.
++- Existing users can generate recovery codes with `sockt account` and their
++  current password; generating new codes invalidates all earlier ones.
++- Forgot your password? `sockt recover` uses a single unused recovery code to
++  reset it, revokes every old session and issues a new recovery-code set.
++- Manage active device sessions, revoke any session, change passwords, or log
++  out the current device. Two devices can now chat using the **same username**.
++  Presence counts unique usernames rather than connected sessions.
++- Press `Ctrl+P`, or type `/account`, to open the account-management menu from
++  the chat UI. The menu uses secure terminal password prompts outside the TUI.
++- Preserves the signed, opt-in v0.8 client updater and existing chat protocol.
++  There is no database modification to message content or chat-history IDs.
++
++## Upgrading a running server
++
++**Do not deploy the v0.9 client before the v0.9 server.** The server must first
++apply the additive Neon PostgreSQL migration `002_accounts.up.sql`. It preserves
++existing users, passwords, messages, invitations and sessions. Read the full
++**[v0.9 Hetzner/Neon/PM2 deployment guide](docs/ACCOUNTS-v09.md)** and
++[the short upgrade overview](UPGRADE-v08.md) before updating production.
++
++Keep your current v0.8 Ed25519 release signing key. **Don't regenerate it** when
++publishing the v0.9 client. The existing Nginx routes at `/ws` and `/updates`
++remain unchanged. For client update publishing, see
++[the updater guide](docs/UPDATES.md).
++
++## Main commands
+ 
+-Sockt is a compact, terminal-first messenger with a Go/Bubble Tea client and an invite-only Go server. **v0.7 switched from raw TCP to WebSockets** so it can share your existing Hetzner HTTPS infrastructure with your Next.js website. PostgreSQL stores accounts, invitations, sessions, conversations and messages. v0.7 supports **one general room**; friends, private DMs, groups and replies are roadmap items, **not** present in this release.
+-
+-## v0.8: client updates
+-
+-After the initial manual installation of an updater-enabled v0.8 client, users see an in-terminal update banner and can install and restart with **F2 → Y**. Update metadata is an Ed25519-signed manifest served over HTTPS on the same hostname as their Sockt WSS server; binaries are verified by SHA-256 before installation. **Windows clients must ship with `sockt-updater.exe` beside `sockt.exe`**. No database schema changes. For full release signing, static Nginx route, versioned artifact publishing and limitations, see **[docs/UPDATES.md](docs/UPDATES.md)**. The chat server is still updated manually.
+-
+-## What changed
+-
+-- Remote clients use `wss://chat.yourdomain.com/ws` (valid TLS certificate required).
+-- Local development uses `ws://127.0.0.1:8080/ws`; `ws://` to non-loopback hosts is rejected.
+-- The server binds to `127.0.0.1:8080` (cannot bind to public IP); your existing Nginx/Caddy reverse proxy terminates HTTPS.
+-- The v0.6 database and JSON packet shape are unchanged, and the client keeps minimal/classic chat UI, authentication and reconnection.
+-- No Tailscale required. Don't expose PostgreSQL 5432 or Sockt's loopback HTTP port 8080 publicly.
+-
+-## Structure
+-
+-```
+-sockt/
+-├── cmd/sockt/                    # Windows/Linux terminal client entry point
+-├── cmd/socktd/                   # Server + administration commands
+-├── internal/client/              # Register/login, reconnect and event processing
+-├── internal/config/              # WSS URL validation; local user profile
+-├── internal/database/            # PostgreSQL, Argon2id auth, embedded migrations
+-│   └── migrations/
+-├── internal/protocol/            # Shared newline-delimited JSON packets
+-├── internal/server/              # Authenticated server hub / broadcast
+-├── internal/transport/           # WebSocket dial and HTTP upgrade adapter
+-├── internal/tui/                 # Bubble Tea minimal/classic UI
+-├── deploy/hetzner/              # Private PostgreSQL Compose + deployment guide
+-├── deploy/proxy/                # Caddy & Nginx separate-subdomain examples
+-├── deploy/systemd/              # Linux service + protected environment sample
+-├── docs/                        # Architecture and wire protocol
+-├── scripts/                     # Windows/Linux binaries
+-├── compose.yaml                 # Local PostgreSQL
+-├── .env.example
+-└── go.mod
++```text
++sockt                 Launch the chat
++sockt setup           Register, log in, or recover an account
++sockt login           Login with username and password
++sockt recover         Reset a forgotten password with one unused recovery code
++sockt account         Sessions, revoke, password change, recovery-code rotation
++sockt logout          Log out and revoke this device's session
++sockt version         Print the client version
++socktd migrate        Apply SQL migrations (operator, on server)
++socktd invite USER    Create a single-use, username-bound invitation
++socktd serve          Start the WebSocket server (PM2 on Hetzner)
+ ```
+ 
+ ## Local development
+ 
+-Requires Go 1.25+ and Docker Compose (the existing v0.6 Go dependencies remain). From the repository root:
++Install the Go version specified by `go.mod` and Docker Compose if using the
++bundled local PostgreSQL container. The production database belongs in Neon
++and must not be used for automated integration tests.
+ 
+-```powershell
+-# Create .env from .env.example with a NEW password that matches both values.
++```bash
++# From the repository root. Configure .env with your local database password.
+ docker compose up -d
+ go mod tidy
+-$env:DATABASE_URL = "postgres://sockt_dev:YOUR_PASSWORD@127.0.0.1:5432/sockt?sslmode=disable"
+-go run ./cmd/socktd migrate
+-go run ./cmd/socktd invite Paulos
+-# Save the displayed one-time token. Then start Sockt:
+-go run ./cmd/socktd serve
+-```
+-
+-In a **second** PowerShell terminal:
+-
+-```powershell
+-go run ./cmd/sockt setup
+-# Server: ws://127.0.0.1:8080/ws
+-# Register, enter the invitation, choose a password.
+-go run ./cmd/sockt
+-```
+-
+-For an existing account, choose **login** rather than register in the setup wizard. If an initial setup already completed, just run `sockt` (or `go run ./cmd/sockt`). To test with a second account, use another OS login (Sockt keeps one profile per OS user).
+-
+-### Run checks and build binaries
+-
+-```powershell
+-go mod tidy
+-go fmt ./...
+ go vet ./...
+ go test ./...
+-.\scripts\build.ps1
++go build ./...
++# Set DATABASE_URL in your shell or protected .env loader, then:
++go run ./cmd/socktd migrate
++go run ./cmd/socktd invite TestUser
++go run ./cmd/socktd serve
+ ```
+ 
+-Use `scripts/build.sh` on Linux/macOS. `go.sum` is generated by `go mod tidy` when the real Go modules are available; commit it to your own repository.
+-
+-## Hetzner deployment without Tailscale
+-
+-Read **[deploy/hetzner/README.md](deploy/hetzner/README.md)** and **[UPGRADE-v06.md](UPGRADE-v06.md)** if you have existing v0.6 accounts/messages. Use a separate `chat.yourdomain.com` HTTPS vhost pointing **only** `/ws` to the loopback server at `127.0.0.1:8080`. See `deploy/proxy/` for Caddy and Nginx examples; merge them into your actual existing proxy configuration rather than replacing your Next.js site. Your friends install only the client binary and enter the WSS URL, username, invite and password.
+-
+-### Administration commands
+-
+-```text
+-socktd migrate             Apply PostgreSQL migrations
+-socktd invite USERNAME     Generate one one-time account invite
+-socktd import-json --file old/messages.json   One-time pre-v0.6 import ONLY
+-socktd serve --listen 127.0.0.1:8080          Run loopback WebSocket server
+-```
++Run `go run ./cmd/sockt setup` in another terminal with
++`ws://127.0.0.1:8080/ws` to test local registration. The new-client default is
++`wss://chat.dpaulos.pt/ws` for the hosted beta, but the setup prompt lets you
++enter a different secure server address.
+ 
+-All admin commands require the real `DATABASE_URL` via the process environment; do not commit it. Public WS status checks are not authentication tests; test client register/login and live messaging after deployment.
++For PostgreSQL integration tests, create an **isolated disposable database**
++and set `SOCKT_TEST_DATABASE_URL`. Never set that variable to your real Neon
++production branch: the test suite deliberately creates example accounts.
+ 
+-## Important security boundaries
++## Scope and security
+ 
+-This is an **invite-only beta**. HTTPS/WSS encrypts transit, **not** messages at rest or end-to-end; the server can access PostgreSQL message content. The session token is stored in a user-only local JSON config (not the OS keychain). Do not share config directories or use untrusted shared PCs. There is no password-reset, token-revocation UI, public abuse moderation or independent security audit. Limit invite distribution and monitor service logs/connection behavior before sharing broadly. Test backups and restores; a Docker volume alone is not a backup.
++v0.9 has one shared general conversation. Friends, DMs, groups, optional
++verified email, password-reset emails, MFA, and OS credential-vault integration
++remain future work. Tokens are currently saved in a user-only local config
++file. Passwords are Argon2id-hashed; server-side recovery codes are only hashed
++and single-use. Public remote connections must use `wss://`. Sockt does **not**
++provide end-to-end encryption: the server and database administrator can access
++stored messages. Limit invitations to trusted users while this is a beta.
+diff --git a/UPGRADE-v08.md b/UPGRADE-v08.md
+new file mode 100644
+index 0000000..1345ede
+--- /dev/null
++++ b/UPGRADE-v08.md
+@@ -0,0 +1,10 @@
++# Upgrading Sockt v0.8 to v0.9
++
++**Read [`docs/ACCOUNTS-v09.md`](docs/ACCOUNTS-v09.md) before deploying.**
++
++v0.9 adds invitation-only recovery codes, a terminal account-management menu,
++multiple concurrent device sessions, device revocation, password change and
++one-time password recovery. An additive `002_accounts.up.sql` Neon PostgreSQL
++migration preserves your v0.8 accounts and conversations; deploy the server
++and migration before distributing the new client. Reuse your existing v0.8
++Ed25519 release-signing key. The server stays under PM2 on Hetzner.
+diff --git a/cmd/sockt/account_menu.go b/cmd/sockt/account_menu.go
+new file mode 100644
+index 0000000..414b09b
+--- /dev/null
++++ b/cmd/sockt/account_menu.go
+@@ -0,0 +1,184 @@
++package main
++
++import (
++	"bufio"
++	"fmt"
++	"os"
++	"runtime"
++	"strconv"
++	"strings"
++
++	"sockt/internal/client"
++	"sockt/internal/config"
++	"sockt/internal/protocol"
++)
++
++func defaultDevice() string {
++	switch runtime.GOOS {
++	case "windows":
++		return "Windows PC"
++	case "darwin":
++		return "Mac"
++	case "linux":
++		return "Linux device"
++	default:
++		return "Sockt device"
++	}
++}
++
++func askDevice(reader *bufio.Reader, current string) (string, error) {
++	if current == "" {
++		current = defaultDevice()
++	}
++	label := prompt(reader, "Device name", current)
++	if !protocol.ValidDeviceLabel(label) {
++		return "", fmt.Errorf("device name must be 1-64 printable characters")
++	}
++	return label, nil
++}
++
++func askNewPassword() (string, error) {
++	pass, err := secretPrompt("New password (12-128 bytes)")
++	if err != nil {
++		return "", err
++	}
++	if len(pass) < 12 || len(pass) > 128 {
++		return "", fmt.Errorf("password must be 12-128 bytes")
++	}
++	confirm, err := secretPrompt("Confirm new password")
++	if err != nil {
++		return "", err
++	}
++	if pass != confirm {
++		return "", fmt.Errorf("passwords don't match")
++	}
++	return pass, nil
++}
++
++func showRecoveryCodes(codes []string) {
++	if len(codes) == 0 {
++		fmt.Println("The connected server did not provide recovery codes. Upgrade socktd before distributing v0.9.")
++		return
++	}
++	fmt.Println("\nIMPORTANT: Save these recovery codes securely. Each works once.")
++	fmt.Println("They will NOT be shown again. Never share them or save them in Git.")
++	for i, code := range codes {
++		fmt.Printf("  %d. %s\n", i+1, code)
++	}
++	fmt.Println("If you lose all codes AND your password, there is no self-service recovery.")
++}
++
++// runAccountMenu operates outside the alternate-screen chat UI. Secret prompts
++// use the terminal's no-echo password reader and never enter TUI history.
++func runAccountMenu(store *config.Store) (bool, error) {
++	reader := bufio.NewReader(os.Stdin)
++	for {
++		account := store.Value
++		if account.Token == "" {
++			return false, fmt.Errorf("no session; run sockt login")
++		}
++		fmt.Printf("\nSockt · %s · Account management\n", account.Username)
++		fmt.Println("1) Connected devices and revoke session")
++		fmt.Println("2) Change password (logs out other devices)")
++		fmt.Println("3) Generate new recovery codes (replaces old codes)")
++		fmt.Println("4) Log out this device")
++		fmt.Println("5) Return to chat")
++		switch strings.TrimSpace(prompt(reader, "Choose [1-5]", "5")) {
++		case "1":
++			sessions, err := client.ListSessions(account.Server, account.Username, account.Token)
++			if err != nil {
++				fmt.Println("Could not fetch sessions:", err)
++				continue
++			}
++			if len(sessions) == 0 {
++				fmt.Println("No active sessions returned.")
++				continue
++			}
++			for i, s := range sessions {
++				current := ""
++				if s.Current {
++					current = " [THIS DEVICE]"
++				}
++				fmt.Printf("%d) %s%s · Last active %s · Expires %s\n", i+1, s.Device, current,
++					s.LastSeenAt.Local().Format("2006-01-02 15:04"), s.ExpiresAt.Local().Format("2006-01-02"))
++			}
++			selection := strings.TrimSpace(prompt(reader, "Session number to revoke (Enter to cancel)", ""))
++			if selection == "" {
++				continue
++			}
++			index, err := strconv.Atoi(selection)
++			if err != nil || index < 1 || index > len(sessions) {
++				fmt.Println("Invalid number")
++				continue
++			}
++			choice := sessions[index-1]
++			if strings.ToLower(prompt(reader, "Revoke this session? [y/N]", "n")) != "y" {
++				continue
++			}
++			if err = client.RevokeSession(account.Server, account.Username, account.Token, choice.ID); err != nil {
++				fmt.Println("Could not revoke:", err)
++				continue
++			}
++			fmt.Println("Session revoked. An already connected device may disconnect on its next heartbeat.")
++			if choice.Current {
++				account.Token = ""
++				account.LastSeen = 0
++				if err = store.Save(account); err != nil {
++					return false, err
++				}
++				return false, nil
++			}
++		case "2":
++			oldPassword, err := secretPrompt("Current password")
++			if err != nil {
++				return false, err
++			}
++			newPassword, err := askNewPassword()
++			if err != nil {
++				fmt.Println(err)
++				continue
++			}
++			newToken, err := client.ChangePassword(account.Server, account.Username, account.Token, oldPassword, newPassword, account.DeviceLabel)
++			if err != nil {
++				fmt.Println("Password change failed:", err)
++				continue
++			}
++			account.Token = newToken
++			if err = store.Save(account); err != nil {
++				return false, fmt.Errorf("password changed, but could not save new session: %w; run sockt login", err)
++			}
++			fmt.Println("Password changed. Your other sessions were revoked.")
++		case "3":
++			password, err := secretPrompt("Confirm account password")
++			if err != nil {
++				return false, err
++			}
++			codes, err := client.GenerateRecoveryCodes(account.Server, account.Username, account.Token, password)
++			if err != nil {
++				fmt.Println("Could not generate recovery codes:", err)
++				continue
++			}
++			showRecoveryCodes(codes)
++			fmt.Print("Press Enter after storing them securely...")
++			_, _ = reader.ReadString('\n')
++		case "4":
++			if strings.ToLower(prompt(reader, "Log out this device? [y/N]", "n")) != "y" {
++				continue
++			}
++			if err := client.Logout(account.Server, account.Username, account.Token); err != nil {
++				return false, err
++			}
++			account.Token = ""
++			account.LastSeen = 0
++			if err := store.Save(account); err != nil {
++				return false, err
++			}
++			fmt.Println("Logged out. Use sockt login to return.")
++			return false, nil
++		case "5":
++			return true, nil
++		default:
++			fmt.Println("Choose an option from 1 to 5")
++		}
++	}
++}
+diff --git a/cmd/sockt/main.go b/cmd/sockt/main.go
+index ee0022e..0073a69 100644
+--- a/cmd/sockt/main.go
++++ b/cmd/sockt/main.go
+@@ -46,11 +46,17 @@ func secretPrompt(label string) (string, error) {
+ 	return string(raw), nil
+ }
+ 
+-func onboard(store *config.Store, forceLogin bool) error {
++// Onboarding runs outside the alternate-screen chat UI so secrets never echo.
++// forceLogin is used by `sockt login`; recovery is a separate command.
++func onboard(store *config.Store, forceLogin bool, forceRecovery bool) error {
+ 	reader := bufio.NewReader(os.Stdin)
+ 	old := store.Value
+-	fmt.Print("\nSockt v0.8 · account setup\n\n")
+-	addr := prompt(reader, "Server WebSocket URL (wss://host/ws)", old.Server)
++	fmt.Print("\nSockt · account setup\n\n")
++	serverDefault := old.Server
++	if serverDefault == "" || serverDefault == config.LocalURL {
++		serverDefault = config.DefaultRemoteURL
++	}
++	addr := prompt(reader, "Server WebSocket URL", serverDefault)
+ 	if err := config.ValidateServerAddress(addr); err != nil {
+ 		return err
+ 	}
+@@ -59,72 +65,97 @@ func onboard(store *config.Store, forceLogin bool) error {
+ 		return fmt.Errorf("username must use 1-24 letters, digits or underscores")
+ 	}
+ 	mode := "l"
+-	if !forceLogin {
+-		mode = strings.ToLower(prompt(reader, "Register a new account or log in? [r/l]", "r"))
++	if forceRecovery {
++		mode = "f"
++	} else if !forceLogin {
++		mode = strings.ToLower(prompt(reader, "[R]egister, [L]og in or [F]orgot password?", "l"))
++	}
++	device, err := askDevice(reader, old.DeviceLabel)
++	if err != nil {
++		return err
+ 	}
+ 	var token string
+-	var err error
++	var codes []string
+ 	switch mode {
+ 	case "r", "register":
+-		invite, inviteErr := secretPrompt("One-time registration invite")
+-		if inviteErr != nil {
+-			return inviteErr
+-		}
+-		password, pwdErr := secretPrompt("Choose password (12+ characters)")
+-		if pwdErr != nil {
+-			return pwdErr
++		invite, err := secretPrompt("One-time invitation code")
++		if err != nil {
++			return err
+ 		}
+-		confirm, confirmErr := secretPrompt("Confirm password")
+-		if confirmErr != nil {
+-			return confirmErr
++		pass, err := askNewPassword()
++		if err != nil {
++			return err
+ 		}
+-		if password != confirm {
+-			return fmt.Errorf("passwords do not match")
++		token, codes, err = client.RegisterWithRecovery(addr, username, strings.TrimSpace(invite), pass, device)
++		if err != nil {
++			return err
+ 		}
+-		token, err = client.Register(addr, username, strings.TrimSpace(invite), password)
+-		// Never save the invite code or password in a config file.
+ 	case "l", "login":
+-		password, pwdErr := secretPrompt("Account password")
+-		if pwdErr != nil {
+-			return pwdErr
++		pass, err := secretPrompt("Password")
++		if err != nil {
++			return err
+ 		}
+-		token, err = client.PasswordLogin(addr, username, password)
++		token, err = client.PasswordLoginDevice(addr, username, pass, device)
++		if err != nil {
++			return err
++		}
++	case "f", "recover", "forgot":
++		code, err := secretPrompt("Unused recovery code")
++		if err != nil {
++			return err
++		}
++		pass, err := askNewPassword()
++		if err != nil {
++			return err
++		}
++		token, codes, err = client.RecoverPassword(addr, username, code, pass, device)
++		if err != nil {
++			return err
++		}
++		fmt.Println("Password reset. All previous device sessions were revoked.")
+ 	default:
+-		return fmt.Errorf("choose r to register or l to log in")
+-	}
+-	if err != nil {
+-		return err
++		return fmt.Errorf("select register (r), login (l), or recover (f)")
+ 	}
+ 	style := old.Style
+ 	if style == "" {
+ 		style = "minimal"
+ 	}
+-	if !forceLogin {
+-		style = prompt(reader, "Appearance [minimal/classic]", "minimal")
++	if !forceLogin && !forceRecovery && mode != "l" {
++		style = prompt(reader, "Appearance [minimal/classic]", style)
+ 		if style != "classic" {
+ 			style = "minimal"
+ 		}
+ 	}
+-	cfg := config.Config{Version: 2, Server: addr, Username: username, Token: token, Style: style, Quiet: true, LastSeen: 0}
++	// Persist the session before displaying codes: otherwise a terminal
++	// disconnect after successful registration could strand the account.
++	cfg := config.Config{Version: 3, Server: addr, Username: username, Token: token, Style: style, Quiet: old.Quiet, LastSeen: 0, DeviceLabel: device}
+ 	if err := store.Save(cfg); err != nil {
+-		return err
++		return fmt.Errorf("login succeeded, but could not save local session: %w", err)
++	}
++	if mode == "r" || mode == "register" || mode == "f" || mode == "recover" || mode == "forgot" {
++		showRecoveryCodes(codes)
++		if len(codes) > 0 {
++			fmt.Print("Press Enter after storing your codes securely...")
++			_, _ = reader.ReadString('\n')
++		}
+ 	}
+ 	fmt.Println("You're signed in. Run `sockt` to chat.")
+ 	return nil
+ }
+ func usage() {
+-	fmt.Println(`Sockt v0.7 — terminal messenger
++	fmt.Println(`Sockt v0.9 — terminal messenger
+ 
+-  sockt                  Open chat (first launch prompts for account setup)
+-  sockt setup            Register or log into a different server/account
+-  sockt login            Renew a session using your account password
+-  sockt --style classic  Use the classic layout for this run
+-  F2                    Install a verified update when available
+-  sockt --server URL     Only accepts current configured URL (token safety)
+-  sockt version          Print version
++  sockt               Open chat
++  sockt setup         Register, log in, or recover access
++  sockt login         Log in with username and password
++  sockt recover       Recover your account with a one-use code
++  sockt account       Manage password, devices, and recovery codes
++  sockt logout        Revoke this device's session
++  /account or Ctrl+P  Open account management from the chat UI
++  F2                  Install a verified update if available
++  sockt version       Print version
+ 
+-Remote connections REQUIRE wss:// via a trusted HTTPS reverse proxy.
+-Only ws://localhost... is permitted for local development.`)
++Remote servers require wss:// and a valid trusted TLS certificate.`)
+ }
+ func main() {
+ 	args := os.Args[1:]
+@@ -148,16 +179,45 @@ func main() {
+ 		fmt.Fprintln(os.Stderr, err)
+ 		os.Exit(1)
+ 	}
+-	if len(args) > 0 && (args[0] == "setup" || args[0] == "login") {
+-		if err := onboard(store, args[0] == "login"); err != nil {
+-			fmt.Fprintln(os.Stderr, "Account:", err)
+-			os.Exit(1)
++	if len(args) > 0 {
++		switch args[0] {
++		case "setup", "login", "recover":
++			err = onboard(store, args[0] == "login", args[0] == "recover")
++			if err != nil {
++				fmt.Fprintln(os.Stderr, "Account:", err)
++				os.Exit(1)
++			}
++			return
++		case "account":
++			_, err = runAccountMenu(store)
++			if err != nil {
++				fmt.Fprintln(os.Stderr, "Account:", err)
++				os.Exit(1)
++			}
++			return
++		case "logout":
++			if store.Value.Token == "" {
++				fmt.Println("Already logged out")
++				return
++			}
++			c := store.Value
++			if err = client.Logout(c.Server, c.Username, c.Token); err != nil {
++				fmt.Fprintln(os.Stderr, "Logout:", err)
++				os.Exit(1)
++			}
++			c.Token = ""
++			c.LastSeen = 0
++			if err = store.Save(c); err != nil {
++				fmt.Fprintln(os.Stderr, "Save:", err)
++				os.Exit(1)
++			}
++			fmt.Println("Logged out. Run sockt login to return.")
++			return
+ 		}
+-		return
+ 	}
+ 	if store.Value.Token == "" || store.Value.Server == "" {
+ 		fmt.Println("Sockt needs an account before chatting.")
+-		if err := onboard(store, false); err != nil {
++		if err = onboard(store, false, false); err != nil {
+ 			fmt.Fprintln(os.Stderr, "Account:", err)
+ 			os.Exit(1)
+ 		}
+@@ -168,37 +228,56 @@ func main() {
+ 		defaultServer = env
+ 	}
+ 	addr := flags.String("server", defaultServer, "WebSocket server URL")
+-	style := flags.String("style", store.Value.Style, "UI appearance: minimal or classic")
++	style := flags.String("style", store.Value.Style, "minimal or classic")
+ 	quiet := flags.Bool("quiet", store.Value.Quiet, "Suppress nonessential notices")
+ 	_ = flags.Parse(args)
+ 	if *style != "minimal" && *style != "classic" {
+-		fmt.Fprintln(os.Stderr, "Style must be minimal or classic")
++		fmt.Fprintln(os.Stderr, "Invalid style")
+ 		os.Exit(2)
+ 	}
+-	if err := config.ValidateServerAddress(*addr); err != nil {
++	if err = config.ValidateServerAddress(*addr); err != nil {
+ 		fmt.Fprintln(os.Stderr, "Invalid server:", err)
+ 		os.Exit(2)
+ 	}
+ 	if *addr != store.Value.Server {
+-		fmt.Fprintln(os.Stderr, "Cannot reuse a saved session token with a different server URL. Run `sockt setup` and log into that server instead.")
++		fmt.Fprintln(os.Stderr, "Cannot reuse a session with a different server; run sockt setup")
+ 		os.Exit(2)
+ 	}
+-	since := store.Value.LastSeen
+-	onSeen := store.UpdateSeen
+-	session := client.New(*addr, store.Value.Username, store.Value.Token, since, onSeen)
+-	defer session.Close()
+-	program := tea.NewProgram(tui.New(store.Value.Username, session, *style, *quiet, *addr))
+-	final, err := program.Run()
+-	if err != nil {
+-		fmt.Fprintln(os.Stderr, "Sockt UI:", err)
+-		os.Exit(1)
+-	}
+-	if model, ok := final.(tui.Model); ok && model.UpgradePath() != "" {
++	for {
++		c := store.Value
++		if c.Token == "" {
++			return
++		}
++		session := client.New(*addr, c.Username, c.Token, c.LastSeen, store.UpdateSeen)
++		program := tea.NewProgram(tui.New(c.Username, session, *style, *quiet, *addr))
++		final, runErr := program.Run()
+ 		session.Close()
+-		fmt.Println("Installing verified Sockt update and restarting...")
+-		if err := updater.InstallAndRestart(model.UpgradePath()); err != nil {
+-			fmt.Fprintln(os.Stderr, "Sockt update:", err)
++		if runErr != nil {
++			fmt.Fprintln(os.Stderr, "Sockt UI:", runErr)
+ 			os.Exit(1)
+ 		}
++		model, ok := final.(tui.Model)
++		if !ok {
++			return
++		}
++		if model.UpgradePath() != "" {
++			fmt.Println("Installing verified Sockt update and restarting...")
++			if err = updater.InstallAndRestart(model.UpgradePath()); err != nil {
++				fmt.Fprintln(os.Stderr, "Sockt update:", err)
++				os.Exit(1)
++			}
++			return
++		}
++		if !model.AccountRequested() {
++			return
++		}
++		again, accountErr := runAccountMenu(store)
++		if accountErr != nil {
++			fmt.Fprintln(os.Stderr, "Account:", accountErr)
++			return
++		}
++		if !again {
++			return
++		}
+ 	}
+ }
+diff --git a/docs/ACCOUNTS-v09.md b/docs/ACCOUNTS-v09.md
+new file mode 100644
+index 0000000..5a0d6e5
+--- /dev/null
++++ b/docs/ACCOUNTS-v09.md
+@@ -0,0 +1,154 @@
++# Sockt v0.9 — Invitation-only accounts, recovery and sessions
++
++**Deployment:** v0.9 server first, v0.9 clients afterward. This is an additive
++PostgreSQL migration over the existing Neon v0.8 schema and retains your
++accounts, chat history, existing password hashes and pre-existing sessions.
++No mandatory email, SMTP, OAuth, or Tailscale. Your HTTPS/WSS proxy is unchanged.
++
++## New account flows
++
++- `sockt setup`: select Register, Login or Forgot password. New users need the
++  server-generated invitation for their username. They choose a password and a
++  human-readable device label. Registration generates **eight recovery codes**.
++- Recovery codes appear **only once** during registration or on manual rotation.
++  Each is 160 random bits, printed as Base32 groups and stored only as SHA-256
++  hashes server-side. Write them in a private password manager. They are NOT
++  automatically saved to disk or sent by email.
++- `sockt recover`: username, one unused recovery code, and a new password. The
++  used code and **all remaining codes in that set** become invalid. All old
++  sessions are revoked, a new current session is created and eight fresh
++  recovery codes appear once. Store the replacement set securely.
++- `sockt login`: username/password and optional device label; issues an
++  independent 30-day session for that device. Existing v0.8 sessions remain
++  valid unless revoked/expired.
++- `sockt account` or `/account` / `Ctrl+P` inside chat opens the account menu:
++  see active sessions, revoke a specific session, change password, rotate all
++  recovery codes (requires password), or log out the current device.
++- `sockt logout` revokes only the local device's session and removes its locally
++  cached token. Changing/resetting a password revokes ALL other sessions.
++- Same username can connect from multiple computers concurrently. Presence
++  still counts unique users, not connected devices.
++
++Current session tokens remain in user-only local `config.json`. OS credential
++vault storage, self-service email recovery, MFA, and friend lists are later
++projects. The nullable `users.email` field is reserved for optional verified
++email support; **do not store unverified addresses or pretend email recovery is
++available**.
++
++## Deploy on your Hetzner VPS with PM2
++
++**Never run `go test` with `SOCKT_TEST_DATABASE_URL` set to your live Neon DB.**
++The database integration tests assume a fresh disposable database and insert
++sample accounts. First test v0.9 in a newly created *disposable Neon branch*
++or independent local PostgreSQL database.
++
++1. On your development PC, apply the upgrade after v0.8 and run `go mod tidy`,
++   `go vet ./...`, `go test -race ./...`, and `go build ./...`. On a fresh
++   disposable DB, additionally set `SOCKT_TEST_DATABASE_URL` and run the
++   integration test. **Verify v0.8 updater actually works on your platform**
++   before attempting in-app delivery of v0.9.
++2. Create a Neon recovery point / backup. From Hetzner, optionally produce an
++   additional encrypted, off-server backup using `pg_dump`. If the private
++   backup stays on the VPS temporarily:
++
++   ```bash
++   sudo install -d -m 0700 /var/backups/sockt
++   sudo bash -c '
++   umask 077
++   set -a
++   . /etc/sockt/socktd.env
++   set +a
++   pg_dump -Fc "$DATABASE_URL" > "/var/backups/sockt/sockt-pre-v09-$(date -u +%Y%m%dT%H%M%SZ).dump"
++   '
++   ```
++
++   Copy the backup **off the VPS** and test restoring into an isolated database.
++   The SQL migration is additive; don't drop recovery codes to roll back.
++
++3. Merge/review and push v0.9 to your private `dpaulos6/sockt` repo. On Hetzner:
++
++   ```bash
++   cd /opt/sockt/src
++   git pull --ff-only
++   go mod download
++   go vet ./...
++   go test ./...  # production env must NOT define SOCKT_TEST_DATABASE_URL
++   go build -o /opt/sockt/socktd.v09.new ./cmd/socktd
++   ```
++
++4. **Migrate while v0.8 is still running.** The new columns are additive and
++   have defaults compatible with the old binary.
++
++   ```bash
++   sudo bash -c '
++   set -a
++   . /etc/sockt/socktd.env
++   set +a
++   exec /opt/sockt/socktd.v09.new migrate
++   '
++   ```
++
++   Ensure `schema_migrations` contains `002_accounts.up.sql` afterward.
++
++5. Switch the binary atomically and restart **PM2** (not the now-disabled
++   systemd `socktd` service):
++
++   ```bash
++   cp /opt/sockt/socktd /opt/sockt/socktd.v08.backup
++   mv /opt/sockt/socktd.v09.new /opt/sockt/socktd
++   pm2 restart socktd
++   pm2 logs socktd --lines 30
++   curl -fsS http://127.0.0.1:8080/healthz
++   ```
++
++   The v0.8 binary can be restored if necessary. Avoid attempting a schema
++   rollback: v0.8 operates with the additive v0.9 schema.
++
++6. On your **existing account**, run the v0.9 client `sockt account`, select
++   **Generate new recovery codes**, re-enter your password and store the codes
++   securely. No new invitation is necessary. Test logging in on a second device
++   under the same username. Test session revocation, password change and recovery
++   on a disposable account before encouraging friends to use it.
++
++## Publish the signed v0.9 client release
++
++Keep your **original v0.8 Ed25519 private key on your Windows development PC**.
++Use the same public key and signing key that existing updater-enabled clients
++trust. Do not generate a new signing key, and never upload it to Hetzner.
++
++```powershell
++$env:SOCKT_UPDATE_PUBLIC_KEY = 'THE SAME PUBLIC KEY AS v0.8'
++$env:SOCKT_RELEASE_VERSION = '0.9.0'
++.\scripts\build.ps1
++
++go run ./cmd/sockt-release sign `
++  -key "$env:USERPROFILE\.config\sockt\release-key.hex" `
++  -version 0.9.0 `
++  -base-url https://chat.dpaulos.pt/updates `
++  -dist dist `
++  -out dist/stable.json
++```
++
++Verify the locally built binaries report `0.9.0` and confirm the SHA-256 values
++match the manifest. Upload all **versioned binaries first**, verify each is
++accessible over HTTPS, and replace `/var/www/sockt-updates/stable.json` **last**.
++Only publish after the v0.9 server is healthy and account recovery/session tests
++pass. The existing Nginx `/ws` and `/updates` paths require no changes.
++
++## Security and limitations
++
++- Invite-only is not end-to-end encryption. The server/Neon administrator can
++  still access message contents.
++- Recovery secrets must never appear in application logs, crash reports,
++  public screenshots, chat messages, Git commits, or shared terminal recordings.
++- Password operations are rate-limited per username in process, with a bounded
++  worker pool. This is a small private beta, not a large public signup service.
++  Multi-instance deployments would need shared rate limits and revocation events.
++- Existing active connections are closed immediately on the same server when
++  their sessions are revoked; chat requests and heartbeats also revalidate
++  credentials against PostgreSQL. In a future multi-server deployment, use
++  distributed session-revocation notifications.
++- Without an existing password **or** an unused recovery code, there is no
++  self-service recovery; manual admin recovery is deliberately not included.
++- Account recovery hashes and session labels are persisted in Neon. Back up the
++  database and test point-in-time restoration independently.
+diff --git a/internal/client/account.go b/internal/client/account.go
+index 1216678..0608615 100644
+--- a/internal/client/account.go
++++ b/internal/client/account.go
+@@ -4,40 +4,120 @@ import (
+ 	"context"
+ 	"errors"
+ 	"fmt"
+-	"sockt/internal/transport"
+ 	"time"
+ 
+ 	"sockt/internal/protocol"
++	"sockt/internal/transport"
+ )
+ 
+-// Register and PasswordLogin are short, one-shot account handshakes.
+-// Normal chat continues to use the reconnecting Client in client.go.
+-func accountRequest(addr string, p protocol.Packet) (string, error) {
+-	conn, err := transport.DialWS(context.Background(), addr, 5*time.Second)
++// requestAccount always opens a separate short-lived authenticated WSS connection.
++// Passwords/recovery codes are never stored in the local Sockt configuration.
++func requestAccount(addr string, packet protocol.Packet) (protocol.Packet, error) {
++	conn, err := transport.DialWS(context.Background(), addr, 10*time.Second)
+ 	if err != nil {
+-		return "", err
++		return protocol.Packet{}, err
+ 	}
+ 	defer conn.Close()
+ 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+-	p.Version = protocol.Version
+-	if err = protocol.Write(conn, p); err != nil {
+-		return "", err
++	packet.Version = protocol.Version
++	if err := protocol.Write(conn, packet); err != nil {
++		return protocol.Packet{}, err
+ 	}
+-	reply, err := protocol.Read(protocol.NewScanner(conn))
++	response, err := protocol.Read(protocol.NewScanner(conn))
+ 	if err != nil {
+-		return "", err
++		return protocol.Packet{}, err
+ 	}
+-	if reply.Type == "error" {
+-		return "", errors.New(reply.Text)
++	if response.Type == "error" {
++		return protocol.Packet{}, errors.New(response.Text)
+ 	}
+-	if reply.Type != "authenticated" || len(reply.Token) != 43 {
+-		return "", fmt.Errorf("unexpected server response: %s", reply.Type)
++	return response, nil
++}
++
++func expectAuth(packet protocol.Packet) (string, error) {
++	if packet.Type != "authenticated" || len(packet.Token) != 43 {
++		return "", fmt.Errorf("unexpected account response: %s", packet.Type)
++	}
++	return packet.Token, nil
++}
++
++func RegisterWithRecovery(addr, username, invite, password, device string) (string, []string, error) {
++	p, err := requestAccount(addr, protocol.Packet{Type: "register", Username: username, Invite: invite, Password: password, DeviceLabel: device})
++	if err != nil {
++		return "", nil, err
+ 	}
+-	return reply.Token, nil
++	token, err := expectAuth(p)
++	return token, p.RecoveryCodes, err
+ }
++
++// Retained as a lightweight public helper for older client integrations.
+ func Register(addr, username, invite, password string) (string, error) {
+-	return accountRequest(addr, protocol.Packet{Type: "register", Username: username, Invite: invite, Password: password})
++	token, _, err := RegisterWithRecovery(addr, username, invite, password, "Legacy client")
++	return token, err
++}
++
++func PasswordLoginDevice(addr, username, password, device string) (string, error) {
++	p, err := requestAccount(addr, protocol.Packet{Type: "password_login", Username: username, Password: password, DeviceLabel: device})
++	if err != nil {
++		return "", err
++	}
++	return expectAuth(p)
+ }
+ func PasswordLogin(addr, username, password string) (string, error) {
+-	return accountRequest(addr, protocol.Packet{Type: "password_login", Username: username, Password: password})
++	return PasswordLoginDevice(addr, username, password, "Legacy client")
++}
++
++func RecoverPassword(addr, username, code, newPassword, device string) (string, []string, error) {
++	p, err := requestAccount(addr, protocol.Packet{Type: "recover", Username: username, RecoveryCode: code, NewPassword: newPassword, DeviceLabel: device})
++	if err != nil {
++		return "", nil, err
++	}
++	token, err := expectAuth(p)
++	return token, p.RecoveryCodes, err
++}
++func ChangePassword(addr, username, token, oldPassword, newPassword, device string) (string, error) {
++	p, err := requestAccount(addr, protocol.Packet{Type: "account_password", Username: username, Token: token, Password: oldPassword, NewPassword: newPassword, DeviceLabel: device})
++	if err != nil {
++		return "", err
++	}
++	return expectAuth(p)
++}
++func GenerateRecoveryCodes(addr, username, token, password string) ([]string, error) {
++	p, err := requestAccount(addr, protocol.Packet{Type: "account_codes", Username: username, Token: token, Password: password})
++	if err != nil {
++		return nil, err
++	}
++	if p.Type != "recovery_codes" || len(p.RecoveryCodes) != 8 {
++		return nil, fmt.Errorf("unexpected recovery response: %s", p.Type)
++	}
++	return p.RecoveryCodes, nil
++}
++func ListSessions(addr, username, token string) ([]protocol.SessionInfo, error) {
++	p, err := requestAccount(addr, protocol.Packet{Type: "account_sessions", Username: username, Token: token})
++	if err != nil {
++		return nil, err
++	}
++	if p.Type != "sessions" {
++		return nil, fmt.Errorf("unexpected sessions response: %s", p.Type)
++	}
++	return p.Sessions, nil
++}
++func RevokeSession(addr, username, token, target string) error {
++	p, err := requestAccount(addr, protocol.Packet{Type: "account_revoke", Username: username, Token: token, SessionID: target})
++	if err != nil {
++		return err
++	}
++	if p.Type != "ok" {
++		return fmt.Errorf("unexpected revoke response: %s", p.Type)
++	}
++	return nil
++}
++func Logout(addr, username, token string) error {
++	p, err := requestAccount(addr, protocol.Packet{Type: "account_logout", Username: username, Token: token})
++	if err != nil {
++		return err
++	}
++	if p.Type != "ok" {
++		return fmt.Errorf("unexpected logout response: %s", p.Type)
++	}
++	return nil
+ }
+diff --git a/internal/config/address.go b/internal/config/address.go
+index ed7610c..2e0e3c1 100644
+--- a/internal/config/address.go
++++ b/internal/config/address.go
+@@ -8,6 +8,7 @@ import (
+ )
+ 
+ const LocalURL = "ws://127.0.0.1:8080/ws"
++const DefaultRemoteURL = "wss://chat.dpaulos.pt/ws"
+ 
+ // ValidateServerAddress accepts encrypted WebSocket URLs for any public or
+ // private host. Plain ws:// is only permitted on the same machine for local
+diff --git a/internal/config/config.go b/internal/config/config.go
+index d1cce64..92ff7ba 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -12,13 +12,14 @@ import (
+ )
+ 
+ type Config struct {
+-	Version  int    `json:"version"`
+-	Server   string `json:"server"`
+-	Username string `json:"username"`
+-	Token    string `json:"token"`
+-	LastSeen int64  `json:"last_seen"`
+-	Style    string `json:"style"`
+-	Quiet    bool   `json:"quiet"`
++	Version     int    `json:"version"`
++	Server      string `json:"server"`
++	Username    string `json:"username"`
++	Token       string `json:"token"`
++	LastSeen    int64  `json:"last_seen"`
++	Style       string `json:"style"`
++	Quiet       bool   `json:"quiet"`
++	DeviceLabel string `json:"device_label,omitempty"`
+ }
+ type Store struct {
+ 	mu    sync.Mutex
+@@ -34,7 +35,7 @@ func Path() (string, error) {
+ 	return filepath.Join(dir, "sockt", "config.json"), nil
+ }
+ func Open(path string) (*Store, error) {
+-	c := Config{Style: "minimal", Quiet: true, Server: LocalURL}
++	c := Config{Style: "minimal", Quiet: true, Server: DefaultRemoteURL}
+ 	b, err := os.ReadFile(path)
+ 	if errors.Is(err, os.ErrNotExist) {
+ 		return &Store{path: path, Value: c}, nil
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+index 21ea459..bd469fb 100644
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,6 +1,9 @@
+ package config
+ 
+-import "testing"
++import (
++	"sockt/internal/protocol"
++	"testing"
++)
+ 
+ func TestWebSocketURLSafety(t *testing.T) {
+ 	valid := []string{
+@@ -23,3 +26,16 @@ func TestWebSocketURLSafety(t *testing.T) {
+ 		}
+ 	}
+ }
++
++func TestDeviceLabelSafety(t *testing.T) {
++	for _, s := range []string{"Windows PC", "Home laptop", "Test Device 1"} {
++		if !protocol.ValidDeviceLabel(s) {
++			t.Fatalf("valid label rejected: %q", s)
++		}
++	}
++	for _, s := range []string{"", " ", "line\nbreak", "\x1b[32m", "café"} {
++		if protocol.ValidDeviceLabel(s) {
++			t.Fatalf("invalid label accepted: %q", s)
++		}
++	}
++}
+diff --git a/internal/database/accounts.go b/internal/database/accounts.go
+new file mode 100644
+index 0000000..23be4d1
+--- /dev/null
++++ b/internal/database/accounts.go
+@@ -0,0 +1,332 @@
++package database
++
++import (
++	"context"
++	"crypto/rand"
++	"crypto/sha256"
++	"crypto/subtle"
++	"database/sql"
++	"encoding/base32"
++	"encoding/base64"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"strings"
++
++	"sockt/internal/protocol"
++)
++
++const recoveryCount = 8
++
++// Recovery codes are independent random secrets, never derived from a password.
++// No plaintext recovery code is ever persisted or logged on the server.
++func newRecoveryCode() (string, []byte, error) {
++	random := make([]byte, 20)
++	if _, err := rand.Read(random); err != nil {
++		return "", nil, err
++	}
++	raw := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(random)
++	code := raw[:8] + "-" + raw[8:16] + "-" + raw[16:24] + "-" + raw[24:]
++	hash := sha256.Sum256([]byte(raw))
++	return code, hash[:], nil
++}
++
++func generateRecoveryCodes(ctx context.Context, tx *sql.Tx, userID int64) ([]string, error) {
++	codes := make([]string, 0, recoveryCount)
++	for i := 0; i < recoveryCount; i++ {
++		code, hash, err := newRecoveryCode()
++		if err != nil {
++			return nil, err
++		}
++		if _, err = tx.ExecContext(ctx, `INSERT INTO recovery_codes(code_hash,user_id) VALUES($1,$2)`, hash, userID); err != nil {
++			return nil, err
++		}
++		codes = append(codes, code)
++	}
++	return codes, nil
++}
++
++func recoveryDigest(code string) ([]byte, error) {
++	raw := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(code), "-", ""))
++	if len(raw) != 32 {
++		return nil, ErrInvalidRecoveryCode
++	}
++	if b, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(raw); err != nil || len(b) != 20 {
++		return nil, ErrInvalidRecoveryCode
++	}
++	sum := sha256.Sum256([]byte(raw))
++	return sum[:], nil
++}
++
++func tokenDigest(token string) ([]byte, error) {
++	if len(token) != 43 {
++		return nil, ErrInvalidSession
++	}
++	data, err := base64.RawURLEncoding.DecodeString(token)
++	if err != nil || len(data) != 32 {
++		return nil, ErrInvalidSession
++	}
++	digest := sha256.Sum256([]byte(token))
++	return digest[:], nil
++}
++
++func createLabeledSession(ctx context.Context, tx *sql.Tx, id int64, label string) (string, error) {
++	if label == "" {
++		label = "Unnamed device"
++	}
++	if !protocol.ValidDeviceLabel(label) {
++		return "", errors.New("invalid device label")
++	}
++	token, hash, err := newToken()
++	if err != nil {
++		return "", err
++	}
++	_, err = tx.ExecContext(ctx, `INSERT INTO sessions(token_hash,user_id,expires_at,device_label,last_seen_at)
++        VALUES($1,$2,now()+interval '30 days',$3,now())`, hash, id, label)
++	return token, err
++}
++
++func (s *Store) PasswordLoginDevice(ctx context.Context, username, password, label string) (string, error) {
++	if !protocol.ValidUsername(username) {
++		return "", ErrInvalidCredentials
++	}
++	tx, err := s.db.BeginTx(ctx, nil)
++	if err != nil {
++		return "", err
++	}
++	defer tx.Rollback()
++	var id int64
++	var hash string
++	// The row lock prevents a concurrent password reset from invalidating
++	// the password between verification and session creation.
++	err = tx.QueryRowContext(ctx, `SELECT id,password_hash FROM users WHERE username_key=$1 FOR SHARE`, strings.ToLower(username)).Scan(&id, &hash)
++	if errors.Is(err, sql.ErrNoRows) {
++		return "", ErrInvalidCredentials
++	}
++	if err != nil {
++		return "", err
++	}
++	if !VerifyPassword(hash, password) {
++		return "", ErrInvalidCredentials
++	}
++	token, err := createLabeledSession(ctx, tx, id, label)
++	if err != nil {
++		return "", err
++	}
++	return token, tx.Commit()
++}
++
++func (s *Store) GenerateRecoveryCodes(ctx context.Context, username, token, password string) ([]string, error) {
++	if !protocol.ValidUsername(username) {
++		return nil, ErrInvalidSession
++	}
++	digest, err := tokenDigest(token)
++	if err != nil {
++		return nil, err
++	}
++	tx, err := s.db.BeginTx(ctx, nil)
++	if err != nil {
++		return nil, err
++	}
++	defer tx.Rollback()
++	var id int64
++	var hash string
++	err = tx.QueryRowContext(ctx, `SELECT u.id,u.password_hash FROM users u JOIN sessions s ON s.user_id=u.id
++        WHERE u.username_key=$1 AND s.token_hash=$2 AND s.expires_at>now() FOR UPDATE OF u`, strings.ToLower(username), digest).Scan(&id, &hash)
++	if errors.Is(err, sql.ErrNoRows) {
++		return nil, ErrInvalidSession
++	}
++	if err != nil {
++		return nil, err
++	}
++	if !VerifyPassword(hash, password) {
++		return nil, ErrInvalidCredentials
++	}
++	if _, err = tx.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id=$1`, id); err != nil {
++		return nil, err
++	}
++	codes, err := generateRecoveryCodes(ctx, tx, id)
++	if err != nil {
++		return nil, err
++	}
++	return codes, tx.Commit()
++}
++
++func (s *Store) ChangePassword(ctx context.Context, username, token, oldPassword, newPassword, label string) (string, error) {
++	if !protocol.ValidUsername(username) {
++		return "", ErrInvalidCredentials
++	}
++	digest, err := tokenDigest(token)
++	if err != nil {
++		return "", err
++	}
++	// Hash outside the database transaction to avoid holding locks during Argon2id.
++	newHash, err := HashPassword(newPassword)
++	if err != nil {
++		return "", err
++	}
++	tx, err := s.db.BeginTx(ctx, nil)
++	if err != nil {
++		return "", err
++	}
++	defer tx.Rollback()
++	var id int64
++	var oldHash string
++	err = tx.QueryRowContext(ctx, `SELECT u.id,u.password_hash FROM users u JOIN sessions s ON s.user_id=u.id
++        WHERE u.username_key=$1 AND s.token_hash=$2 AND s.expires_at>now() FOR UPDATE OF u`, strings.ToLower(username), digest).Scan(&id, &oldHash)
++	if errors.Is(err, sql.ErrNoRows) {
++		return "", ErrInvalidSession
++	}
++	if err != nil {
++		return "", err
++	}
++	if !VerifyPassword(oldHash, oldPassword) {
++		return "", ErrInvalidCredentials
++	}
++	if _, err = tx.ExecContext(ctx, `UPDATE users SET password_hash=$1 WHERE id=$2`, newHash, id); err != nil {
++		return "", err
++	}
++	if _, err = tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=$1`, id); err != nil {
++		return "", err
++	}
++	// Force newly authenticated sessions after a password change on every device.
++	newToken, err := createLabeledSession(ctx, tx, id, label)
++	if err != nil {
++		return "", err
++	}
++	return newToken, tx.Commit()
++}
++
++func (s *Store) RecoverPassword(ctx context.Context, username, recoveryCode, newPassword, label string) (string, []string, error) {
++	if !protocol.ValidUsername(username) {
++		return "", nil, ErrInvalidRecoveryCode
++	}
++	digest, err := recoveryDigest(recoveryCode)
++	if err != nil {
++		return "", nil, err
++	}
++	newHash, err := HashPassword(newPassword)
++	if err != nil {
++		return "", nil, err
++	}
++	tx, err := s.db.BeginTx(ctx, nil)
++	if err != nil {
++		return "", nil, err
++	}
++	defer tx.Rollback()
++	var id int64
++	err = tx.QueryRowContext(ctx, `SELECT id FROM users WHERE username_key=$1 FOR UPDATE`, strings.ToLower(username)).Scan(&id)
++	if errors.Is(err, sql.ErrNoRows) {
++		return "", nil, ErrInvalidRecoveryCode
++	}
++	if err != nil {
++		return "", nil, err
++	}
++	var redeemed int64
++	err = tx.QueryRowContext(ctx, `UPDATE recovery_codes SET used_at=now()
++        WHERE code_hash=$1 AND user_id=$2 AND used_at IS NULL RETURNING user_id`, digest, id).Scan(&redeemed)
++	if errors.Is(err, sql.ErrNoRows) {
++		return "", nil, ErrInvalidRecoveryCode
++	}
++	if err != nil {
++		return "", nil, err
++	}
++	if _, err = tx.ExecContext(ctx, `UPDATE users SET password_hash=$1 WHERE id=$2`, newHash, id); err != nil {
++		return "", nil, err
++	}
++	if _, err = tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=$1`, id); err != nil {
++		return "", nil, err
++	}
++	if _, err = tx.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id=$1`, id); err != nil {
++		return "", nil, err
++	}
++	codes, err := generateRecoveryCodes(ctx, tx, id)
++	if err != nil {
++		return "", nil, err
++	}
++	newToken, err := createLabeledSession(ctx, tx, id, label)
++	if err != nil {
++		return "", nil, err
++	}
++	if err = tx.Commit(); err != nil {
++		return "", nil, err
++	}
++	return newToken, codes, nil
++}
++
++func (s *Store) ListSessions(ctx context.Context, username, token string) ([]protocol.SessionInfo, error) {
++	if !protocol.ValidUsername(username) {
++		return nil, ErrInvalidSession
++	}
++	digest, err := tokenDigest(token)
++	if err != nil {
++		return nil, err
++	}
++	var userID int64
++	err = s.db.QueryRowContext(ctx, `SELECT u.id FROM users u JOIN sessions s ON s.user_id=u.id
++        WHERE u.username_key=$1 AND s.token_hash=$2 AND s.expires_at>now()`, strings.ToLower(username), digest).Scan(&userID)
++	if errors.Is(err, sql.ErrNoRows) {
++		return nil, ErrInvalidSession
++	}
++	if err != nil {
++		return nil, err
++	}
++	rows, err := s.db.QueryContext(ctx, `SELECT token_hash,device_label,created_at,last_seen_at,expires_at FROM sessions
++        WHERE user_id=$1 AND expires_at>now() ORDER BY created_at DESC LIMIT 50`, userID)
++	if err != nil {
++		return nil, err
++	}
++	defer rows.Close()
++	sessions := []protocol.SessionInfo{}
++	for rows.Next() {
++		var h []byte
++		var x protocol.SessionInfo
++		if err = rows.Scan(&h, &x.Device, &x.CreatedAt, &x.LastSeenAt, &x.ExpiresAt); err != nil {
++			return nil, err
++		}
++		x.ID = hex.EncodeToString(h)
++		x.Current = subtleCompare(h, digest)
++		sessions = append(sessions, x)
++	}
++	return sessions, rows.Err()
++}
++
++func subtleCompare(a, b []byte) bool {
++	return len(a) == len(b) && subtle.ConstantTimeCompare(a, b) == 1
++}
++
++func (s *Store) RevokeSession(ctx context.Context, username, token, sessionID string) (bool, error) {
++	if !protocol.ValidUsername(username) {
++		return false, ErrInvalidSession
++	}
++	digest, err := tokenDigest(token)
++	if err != nil {
++		return false, err
++	}
++	target, err := hex.DecodeString(sessionID)
++	if err != nil || len(target) != 32 {
++		return false, errors.New("invalid session identifier")
++	}
++	result, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash=$1 AND user_id=(
++        SELECT u.id FROM users u JOIN sessions s ON s.user_id=u.id
++        WHERE u.username_key=$2 AND s.token_hash=$3 AND s.expires_at>now())`, target, strings.ToLower(username), digest)
++	if err != nil {
++		return false, err
++	}
++	n, err := result.RowsAffected()
++	return n == 1, err
++}
++
++func (s *Store) Logout(ctx context.Context, username, token string) error {
++	if !protocol.ValidUsername(username) {
++		return ErrInvalidSession
++	}
++	digest, err := tokenDigest(token)
++	if err != nil {
++		return err
++	}
++	_, err = s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash=$1 AND user_id=(SELECT id FROM users WHERE username_key=$2)`, digest, strings.ToLower(username))
++	return err
++}
++
++var ErrInvalidRecoveryCode = fmt.Errorf("invalid or already used recovery code")
+diff --git a/internal/database/accounts_test.go b/internal/database/accounts_test.go
+new file mode 100644
+index 0000000..9190519
+--- /dev/null
++++ b/internal/database/accounts_test.go
+@@ -0,0 +1,47 @@
++package database
++
++import (
++	"bytes"
++	"strings"
++	"testing"
++)
++
++func TestRecoveryCodesHaveEntropyAndCanonicalDigests(t *testing.T) {
++	seen := make(map[string]struct{})
++	for i := 0; i < 100; i++ {
++		code, digest, err := newRecoveryCode()
++		if err != nil {
++			t.Fatal(err)
++		}
++		if len(code) != 35 || strings.Count(code, "-") != 3 || len(digest) != 32 {
++			t.Fatalf("invalid recovery format/digest: %s", code)
++		}
++		if _, ok := seen[code]; ok {
++			t.Fatal("duplicate random code")
++		}
++		seen[code] = struct{}{}
++		canonical, err := recoveryDigest(strings.ToLower(code))
++		if err != nil || !bytes.Equal(digest, canonical) {
++			t.Fatalf("recovery roundtrip invalid: %v", err)
++		}
++	}
++	for _, bad := range []string{"", "ABC", "00000000-00000000-00000000-00000000", "!!!!!!!!-!!!!!!!!-!!!!!!!!-!!!!!!!!"} {
++		if _, err := recoveryDigest(bad); err == nil {
++			t.Fatalf("invalid code accepted: %q", bad)
++		}
++	}
++}
++
++func TestSessionTokenValidation(t *testing.T) {
++	code, hashed, err := newToken()
++	if err != nil {
++		t.Fatal(err)
++	}
++	actual, err := tokenDigest(code)
++	if err != nil || !bytes.Equal(actual, hashed) {
++		t.Fatalf("token hash mismatch: %v", err)
++	}
++	if _, err := tokenDigest("bad-token"); err == nil {
++		t.Fatal("malformed token accepted")
++	}
++}
+diff --git a/internal/database/migrations/002_accounts.down.sql b/internal/database/migrations/002_accounts.down.sql
+new file mode 100644
+index 0000000..10b5f07
+--- /dev/null
++++ b/internal/database/migrations/002_accounts.down.sql
+@@ -0,0 +1,6 @@
++DROP TABLE IF EXISTS recovery_codes;
++ALTER TABLE sessions DROP COLUMN IF EXISTS last_seen_at;
++ALTER TABLE sessions DROP COLUMN IF EXISTS device_label;
++DROP INDEX IF EXISTS users_verified_email_unique_idx;
++ALTER TABLE users DROP COLUMN IF EXISTS email_verified_at;
++ALTER TABLE users DROP COLUMN IF EXISTS email;
+diff --git a/internal/database/migrations/002_accounts.up.sql b/internal/database/migrations/002_accounts.up.sql
+new file mode 100644
+index 0000000..e946c3a
+--- /dev/null
++++ b/internal/database/migrations/002_accounts.up.sql
+@@ -0,0 +1,12 @@
++ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
++ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;
++CREATE UNIQUE INDEX IF NOT EXISTS users_verified_email_unique_idx ON users (lower(email)) WHERE email_verified_at IS NOT NULL;
++ALTER TABLE sessions ADD COLUMN IF NOT EXISTS device_label VARCHAR(64) NOT NULL DEFAULT 'Legacy device';
++ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now();
++CREATE TABLE IF NOT EXISTS recovery_codes (
++  code_hash BYTEA PRIMARY KEY,
++  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
++  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
++  used_at TIMESTAMPTZ
++);
++CREATE INDEX IF NOT EXISTS recovery_codes_user_unused_idx ON recovery_codes (user_id) WHERE used_at IS NULL;
+diff --git a/internal/database/postgres.go b/internal/database/postgres.go
+index 977563c..83e87f4 100644
+--- a/internal/database/postgres.go
++++ b/internal/database/postgres.go
+@@ -65,7 +65,7 @@ func (s *Store) Close() error { return s.db.Close() }
+ // Operators apply reviewed schema changes with `socktd migrate` first.
+ func (s *Store) CheckSchema(ctx context.Context) error {
+ 	var installed bool
+-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = '001_initial.up.sql')`).Scan(&installed)
++	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = '002_accounts.up.sql')`).Scan(&installed)
+ 	if err != nil {
+ 		return fmt.Errorf("schema not initialized; run socktd migrate: %w", err)
+ 	}
+@@ -206,95 +206,63 @@ func VerifyPassword(encoded, password string) bool {
+ 	return subtle.ConstantTimeCompare(got, want) == 1
+ }
+ 
+-func createSession(ctx context.Context, tx *sql.Tx, id int64) (string, error) {
+-	token, hash, err := newToken()
+-	if err != nil {
+-		return "", err
+-	}
+-	_, err = tx.ExecContext(ctx, `INSERT INTO sessions(token_hash,user_id,expires_at)
+-        VALUES($1,$2,now()+interval '30 days')`, hash, id)
+-	return token, err
+-}
+-
+-// Register consumes exactly one invite inside the same transaction that creates
+-// the user, general room membership, and their first session.
+-func (s *Store) Register(ctx context.Context, username, invite, password string) (string, error) {
++func (s *Store) Register(ctx context.Context, username, invite, password, label string) (string, []string, error) {
+ 	if !protocol.ValidUsername(username) || len(invite) != 43 {
+-		return "", ErrInvalidInvite
++		return "", nil, ErrInvalidInvite
+ 	}
+ 	digest := sha256.Sum256([]byte(invite))
+ 	pwdHash, err := HashPassword(password)
+ 	if err != nil {
+-		return "", err
++		return "", nil, err
+ 	}
+ 	tx, err := s.db.BeginTx(ctx, nil)
+ 	if err != nil {
+-		return "", err
++		return "", nil, err
+ 	}
+ 	defer tx.Rollback()
+ 	var inviteID int64
+ 	err = tx.QueryRowContext(ctx, `SELECT id FROM invites WHERE username_key=$1 AND token_hash=$2 AND used_at IS NULL FOR UPDATE`, strings.ToLower(username), digest[:]).Scan(&inviteID)
+ 	if errors.Is(err, sql.ErrNoRows) {
+-		return "", ErrInvalidInvite
++		return "", nil, ErrInvalidInvite
+ 	}
+ 	if err != nil {
+-		return "", err
++		return "", nil, err
+ 	}
+ 	var existing bool
+ 	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE username_key=$1)`, strings.ToLower(username)).Scan(&existing)
+ 	if err != nil {
+-		return "", err
++		return "", nil, err
+ 	}
+ 	if existing {
+-		return "", ErrUsernameUnavailable
++		return "", nil, ErrUsernameUnavailable
+ 	}
+ 	var id int64
+ 	err = tx.QueryRowContext(ctx, `INSERT INTO users(username,username_key,password_hash) VALUES($1,$2,$3) RETURNING id`, username, strings.ToLower(username), pwdHash).Scan(&id)
+ 	if err != nil {
+-		return "", fmt.Errorf("register user (username may be taken): %w", err)
++		return "", nil, fmt.Errorf("register user (username may be taken): %w", err)
+ 	}
+ 	if _, err = tx.ExecContext(ctx, `INSERT INTO conversation_members(conversation_id,user_id) VALUES(1,$1)`, id); err != nil {
+-		return "", err
++		return "", nil, err
+ 	}
+ 	if _, err = tx.ExecContext(ctx, `UPDATE invites SET used_at=now() WHERE id=$1`, inviteID); err != nil {
+-		return "", err
++		return "", nil, err
+ 	}
+-	token, err := createSession(ctx, tx, id)
++	codes, err := generateRecoveryCodes(ctx, tx, id)
+ 	if err != nil {
+-		return "", err
++		return "", nil, err
++	}
++	token, err := createLabeledSession(ctx, tx, id, label)
++	if err != nil {
++		return "", nil, err
+ 	}
+ 	if err = tx.Commit(); err != nil {
+-		return "", err
++		return "", nil, err
+ 	}
+-	return token, nil
++	return token, codes, nil
+ }
+ 
+ func (s *Store) PasswordLogin(ctx context.Context, username, password string) (string, error) {
+-	if !protocol.ValidUsername(username) {
+-		return "", ErrInvalidCredentials
+-	}
+-	var id int64
+-	var hash string
+-	err := s.db.QueryRowContext(ctx, `SELECT id,password_hash FROM users WHERE username_key=$1`, strings.ToLower(username)).Scan(&id, &hash)
+-	if errors.Is(err, sql.ErrNoRows) {
+-		return "", ErrInvalidCredentials
+-	}
+-	if err != nil {
+-		return "", err
+-	}
+-	if !VerifyPassword(hash, password) {
+-		return "", ErrInvalidCredentials
+-	}
+-	tx, err := s.db.BeginTx(ctx, nil)
+-	if err != nil {
+-		return "", err
+-	}
+-	defer tx.Rollback()
+-	token, err := createSession(ctx, tx, id)
+-	if err != nil {
+-		return "", err
+-	}
+-	return token, tx.Commit()
++	return s.PasswordLoginDevice(ctx, username, password, "Legacy client")
+ }
+ 
+ func (s *Store) Authenticate(ctx context.Context, username, session string) (Identity, error) {
+@@ -310,6 +278,9 @@ func (s *Store) Authenticate(ctx context.Context, username, session string) (Ide
+ 	if errors.Is(err, sql.ErrNoRows) {
+ 		return Identity{}, ErrInvalidSession
+ 	}
++	if err == nil {
++		_, _ = s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at=now() WHERE token_hash=$1 AND last_seen_at<now()-interval '5 minutes'`, digest[:])
++	}
+ 	return id, err
+ }
+ 
+diff --git a/internal/database/postgres_test.go b/internal/database/postgres_test.go
+index 4ef2ada..11acfda 100644
+--- a/internal/database/postgres_test.go
++++ b/internal/database/postgres_test.go
+@@ -67,11 +67,14 @@ func TestPostgreSQLIntegration(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	session, err := db.Register(ctx, "Paulos", invite, "strong-password-very-unique")
++	session, codes, err := db.Register(ctx, "Paulos", invite, "strong-password-very-unique", "My desktop")
++	if len(codes) != 8 {
++		t.Fatalf("new account should receive eight recovery codes, got %d", len(codes))
++	}
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	if _, err := db.Register(ctx, "Paulos", invite, "strong-password-very-unique"); !errors.Is(err, ErrInvalidInvite) {
++	if _, _, err := db.Register(ctx, "Paulos", invite, "strong-password-very-unique", "Another device"); !errors.Is(err, ErrInvalidInvite) {
+ 		t.Fatalf("reused invite accepted: %v", err)
+ 	}
+ 	who, err := db.Authenticate(ctx, "Paulos", session)
+@@ -96,4 +99,67 @@ func TestPostgreSQLIntegration(t *testing.T) {
+ 	if err != nil || last != sent.ID || len(history) != 2 {
+ 		t.Fatalf("history failed: %+v last=%d err=%v", history, last, err)
+ 	}
++	// Existing user can rotate codes, then reset password using exactly one.
++	rotated, err := db.GenerateRecoveryCodes(ctx, "Paulos", session, "strong-password-very-unique")
++	if err != nil || len(rotated) != 8 {
++		t.Fatalf("rotate recovery codes: %d %v", len(rotated), err)
++	}
++	if _, _, err = db.RecoverPassword(ctx, "Paulos", codes[0], "my-rotated-password-123", "Recovered"); !errors.Is(err, ErrInvalidRecoveryCode) {
++		t.Fatalf("obsolete recovery code accepted: %v", err)
++	}
++	fresh, freshCodes, err := db.RecoverPassword(ctx, "Paulos", rotated[0], "my-new-password-12345", "Recovered")
++	if err != nil || len(fresh) != 43 || len(freshCodes) != 8 {
++		t.Fatalf("recover failed: %v", err)
++	}
++	if _, _, err = db.RecoverPassword(ctx, "Paulos", rotated[0], "my-new-password-12345", "Attack"); !errors.Is(err, ErrInvalidRecoveryCode) {
++		t.Fatalf("reused code accepted: %v", err)
++	}
++	if _, _, err = db.RecoverPassword(ctx, "Paulos", rotated[1], "more-password-123", "Attacker"); !errors.Is(err, ErrInvalidRecoveryCode) {
++		t.Fatalf("other pre-recovery codes remained usable: %v", err)
++	}
++	if _, err = db.Authenticate(ctx, "Paulos", session); !errors.Is(err, ErrInvalidSession) {
++		t.Fatalf("old session survived password reset: %v", err)
++	}
++	if _, err = db.Authenticate(ctx, "Paulos", fresh); err != nil {
++		t.Fatalf("recovered session invalid: %v", err)
++	}
++	if _, err = db.PasswordLoginDevice(ctx, "Paulos", "strong-password-very-unique", "Old password attempt"); !errors.Is(err, ErrInvalidCredentials) {
++		t.Fatalf("old password still valid after recovery: %v", err)
++	}
++	oldSession, err := db.PasswordLoginDevice(ctx, "Paulos", "my-new-password-12345", "Phone")
++	if err != nil {
++		t.Fatalf("second session login: %v", err)
++	}
++	sessions, err := db.ListSessions(ctx, "Paulos", fresh)
++	if err != nil || len(sessions) != 2 {
++		t.Fatalf("expected two sessions: %+v %v", sessions, err)
++	}
++	var other string
++	for _, v := range sessions {
++		if !v.Current {
++			other = v.ID
++		}
++	}
++	if other == "" {
++		t.Fatal("missing second session ID")
++	}
++	if revoked, err := db.RevokeSession(ctx, "Paulos", fresh, other); err != nil || !revoked {
++		t.Fatalf("revoke other session: %v %v", revoked, err)
++	}
++	if _, err = db.Authenticate(ctx, "Paulos", oldSession); !errors.Is(err, ErrInvalidSession) {
++		t.Fatalf("revoked device authenticated: %v", err)
++	}
++	changed, err := db.ChangePassword(ctx, "Paulos", fresh, "my-new-password-12345", "another-long-password-123", "PC")
++	if err != nil || changed == "" {
++		t.Fatalf("password change: %v", err)
++	}
++	if _, err = db.Authenticate(ctx, "Paulos", fresh); !errors.Is(err, ErrInvalidSession) {
++		t.Fatalf("prior session survived change: %v", err)
++	}
++	if err = db.Logout(ctx, "Paulos", changed); err != nil {
++		t.Fatal(err)
++	}
++	if _, err = db.Authenticate(ctx, "Paulos", changed); !errors.Is(err, ErrInvalidSession) {
++		t.Fatalf("logout didn't revoke current session: %v", err)
++	}
+ }
+diff --git a/internal/protocol/protocol.go b/internal/protocol/protocol.go
+index b6608dc..286811a 100644
+--- a/internal/protocol/protocol.go
++++ b/internal/protocol/protocol.go
+@@ -7,6 +7,7 @@ import (
+ 	"encoding/json"
+ 	"io"
+ 	"regexp"
++	"strings"
+ 	"time"
+ )
+ 
+@@ -21,6 +22,17 @@ const (
+ var validUsername = regexp.MustCompile(`^[A-Za-z0-9_]{1,24}$`)
+ 
+ func ValidUsername(s string) bool { return validUsername.MatchString(s) }
++func ValidDeviceLabel(s string) bool {
++	if len(s) == 0 || len(s) > 64 || strings.TrimSpace(s) == "" {
++		return false
++	}
++	for _, r := range s {
++		if r < 32 || r > 126 {
++			return false
++		}
++	}
++	return true
++}
+ 
+ type Message struct {
+ 	ID       int64     `json:"id"`
+@@ -29,22 +41,40 @@ type Message struct {
+ 	SentAt   time.Time `json:"sent_at"`
+ }
+ 
+-// Handshake: register (username, invite, password), password_login (username, password),
+-// login (username, session token, since_id); then chat and ping.
++// Handshake: register/password_login/recover use one-shot account requests.
++// account_sessions, account_revoke, account_logout, account_password and
++// account_codes use a session token, with password re-confirmation where needed.
++// Streaming chat uses login (username, session token, since_id), chat and ping.
+ // Server -> client: history (messages), ready, message, presence, pong, error.
++// SessionInfo is public account metadata, never a credential.
++type SessionInfo struct {
++	ID         string    `json:"id"`
++	Device     string    `json:"device"`
++	CreatedAt  time.Time `json:"created_at"`
++	LastSeenAt time.Time `json:"last_seen_at"`
++	ExpiresAt  time.Time `json:"expires_at"`
++	Current    bool      `json:"current"`
++}
++
+ type Packet struct {
+-	Version  int       `json:"version,omitempty"`
+-	Type     string    `json:"type"`
+-	Username string    `json:"username,omitempty"`
+-	Invite   string    `json:"invite,omitempty"`
+-	Password string    `json:"password,omitempty"`
+-	Token    string    `json:"token,omitempty"`
+-	Text     string    `json:"text,omitempty"`
+-	SinceID  int64     `json:"since_id,omitempty"`
+-	LastID   int64     `json:"last_id,omitempty"`
+-	Message  *Message  `json:"message,omitempty"`
+-	Messages []Message `json:"messages,omitempty"`
+-	Users    []string  `json:"users,omitempty"`
++	Version       int           `json:"version,omitempty"`
++	Type          string        `json:"type"`
++	Username      string        `json:"username,omitempty"`
++	Invite        string        `json:"invite,omitempty"`
++	Password      string        `json:"password,omitempty"`
++	NewPassword   string        `json:"new_password,omitempty"`
++	RecoveryCode  string        `json:"recovery_code,omitempty"`
++	RecoveryCodes []string      `json:"recovery_codes,omitempty"`
++	DeviceLabel   string        `json:"device_label,omitempty"`
++	SessionID     string        `json:"session_id,omitempty"`
++	Sessions      []SessionInfo `json:"sessions,omitempty"`
++	Token         string        `json:"token,omitempty"`
++	Text          string        `json:"text,omitempty"`
++	SinceID       int64         `json:"since_id,omitempty"`
++	LastID        int64         `json:"last_id,omitempty"`
++	Message       *Message      `json:"message,omitempty"`
++	Messages      []Message     `json:"messages,omitempty"`
++	Users         []string      `json:"users,omitempty"`
+ }
+ 
+ func NewScanner(r io.Reader) *bufio.Scanner {
+diff --git a/internal/server/attempts.go b/internal/server/attempts.go
+new file mode 100644
+index 0000000..119e81b
+--- /dev/null
++++ b/internal/server/attempts.go
+@@ -0,0 +1,51 @@
++package server
++
++import (
++	"strings"
++	"sync"
++	"time"
++)
++
++// Account-facing password and recovery operations are rate-limited per
++// username. This is deliberately conservative for a small invite-only beta.
++type attemptWindow struct {
++	count int
++	until time.Time
++}
++type attemptLimiter struct {
++	mu    sync.Mutex
++	users map[string]attemptWindow
++}
++
++func newAttemptLimiter() *attemptLimiter {
++	return &attemptLimiter{users: make(map[string]attemptWindow)}
++}
++
++func (l *attemptLimiter) allow(username string) bool {
++	now := time.Now()
++	key := strings.ToLower(username)
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	if len(l.users) >= 4096 {
++		for k, v := range l.users {
++			if now.After(v.until) {
++				delete(l.users, k)
++			}
++		}
++		if _, exists := l.users[key]; !exists && len(l.users) >= 4096 {
++			return false
++		}
++	}
++	window, ok := l.users[key]
++	if !ok || now.After(window.until) {
++		window = attemptWindow{until: now.Add(10 * time.Minute)}
++	}
++	window.count++
++	l.users[key] = window
++	return window.count <= 10
++}
++func (l *attemptLimiter) reset(username string) {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	delete(l.users, strings.ToLower(username))
++}
+diff --git a/internal/server/attempts_test.go b/internal/server/attempts_test.go
+new file mode 100644
+index 0000000..2f97571
+--- /dev/null
++++ b/internal/server/attempts_test.go
+@@ -0,0 +1,22 @@
++package server
++
++import "testing"
++
++func TestAccountAttemptLimiter(t *testing.T) {
++	limiter := newAttemptLimiter()
++	for i := 0; i < 10; i++ {
++		if !limiter.allow("Paulos") {
++			t.Fatalf("legitimate attempt %d blocked", i)
++		}
++	}
++	if limiter.allow("paulos") {
++		t.Fatal("case variant bypassed limit")
++	}
++	if !limiter.allow("Miguel") {
++		t.Fatal("another user's limit was affected")
++	}
++	limiter.reset("PAULOS")
++	if !limiter.allow("paulos") {
++		t.Fatal("success did not reset counter")
++	}
++}
+diff --git a/internal/server/hub.go b/internal/server/hub.go
+index 9e44a92..b8c7cc4 100644
+--- a/internal/server/hub.go
++++ b/internal/server/hub.go
+@@ -18,28 +18,36 @@ const maxOnline = 32
+ 
+ type Store interface {
+ 	Authenticate(context.Context, string, string) (database.Identity, error)
+-	Register(context.Context, string, string, string) (string, error)
++	Register(context.Context, string, string, string, string) (string, []string, error)
++	PasswordLoginDevice(context.Context, string, string, string) (string, error)
++	GenerateRecoveryCodes(context.Context, string, string, string) ([]string, error)
++	ChangePassword(context.Context, string, string, string, string, string) (string, error)
++	RecoverPassword(context.Context, string, string, string, string) (string, []string, error)
++	ListSessions(context.Context, string, string) ([]protocol.SessionInfo, error)
++	RevokeSession(context.Context, string, string, string) (bool, error)
++	Logout(context.Context, string, string) error
+ 	PasswordLogin(context.Context, string, string) (string, error)
+ 	History(context.Context, int64) ([]protocol.Message, int64, error)
+ 	InsertMessage(context.Context, database.Identity, string) (protocol.Message, error)
+ }
+ 
+ type peer struct {
+-	identity database.Identity
+-	key      string
+-	conn     net.Conn
+-	outgoing chan protocol.Packet
++	identity  database.Identity
++	key       string
++	tokenHash string
++	conn      net.Conn
++	outgoing  chan protocol.Packet
+ }
+ 
+ type hub struct {
+ 	mu      sync.Mutex
+-	clients map[string]*peer
++	clients map[*peer]struct{}
+ 	store   Store
+ 	logger  *log.Logger
+ }
+ 
+ func newHub(store Store, logger *log.Logger) *hub {
+-	return &hub{clients: make(map[string]*peer), store: store, logger: logger}
++	return &hub{clients: make(map[*peer]struct{}), store: store, logger: logger}
+ }
+ func (c *peer) writeLoop(h *hub) {
+ 	for pkt := range c.outgoing {
+@@ -53,17 +61,17 @@ func (c *peer) writeLoop(h *hub) {
+ 	}
+ }
+ func (h *hub) detachLocked(c *peer) bool {
+-	if h.clients[c.key] != c {
++	if _, ok := h.clients[c]; !ok {
+ 		return false
+ 	}
+-	delete(h.clients, c.key)
++	delete(h.clients, c)
+ 	close(c.outgoing)
+ 	_ = c.conn.Close()
+ 	h.logger.Printf("disconnect user=%q", c.identity.Username)
+ 	return true
+ }
+ func (h *hub) sendLocked(c *peer, p protocol.Packet) {
+-	if h.clients[c.key] != c {
++	if _, ok := h.clients[c]; !ok {
+ 		return
+ 	}
+ 	select {
+@@ -74,14 +82,18 @@ func (h *hub) sendLocked(c *peer, p protocol.Packet) {
+ 	}
+ }
+ func (h *hub) broadcastLocked(p protocol.Packet) {
+-	for _, c := range h.clients {
++	for c := range h.clients {
+ 		h.sendLocked(c, p)
+ 	}
+ }
+ func (h *hub) presenceLocked() {
+-	users := make([]string, 0, len(h.clients))
+-	for _, c := range h.clients {
+-		users = append(users, c.identity.Username)
++	unique := make(map[string]string)
++	for c := range h.clients {
++		unique[c.key] = c.identity.Username
++	}
++	users := make([]string, 0, len(unique))
++	for _, name := range unique {
++		users = append(users, name)
+ 	}
+ 	sort.Strings(users)
+ 	h.broadcastLocked(protocol.Packet{Type: "presence", Users: users})
+@@ -92,9 +104,6 @@ func (h *hub) presenceLocked() {
+ func (h *hub) register(c *peer, since int64) ([]protocol.Message, int64, error) {
+ 	h.mu.Lock()
+ 	defer h.mu.Unlock()
+-	if _, exists := h.clients[c.key]; exists {
+-		return nil, 0, errors.New("this user is already online")
+-	}
+ 	if len(h.clients) >= maxOnline {
+ 		return nil, 0, errors.New("room is full")
+ 	}
+@@ -104,7 +113,7 @@ func (h *hub) register(c *peer, since int64) ([]protocol.Message, int64, error)
+ 	if err != nil {
+ 		return nil, 0, err
+ 	}
+-	h.clients[c.key] = c
++	h.clients[c] = struct{}{}
+ 	h.logger.Printf("connect user=%q remote=%s", c.identity.Username, c.conn.RemoteAddr())
+ 	h.presenceLocked()
+ 	return history, lastID, nil
+@@ -119,7 +128,7 @@ func (h *hub) leave(c *peer) {
+ func (h *hub) shutdown() {
+ 	h.mu.Lock()
+ 	defer h.mu.Unlock()
+-	for _, c := range h.clients {
++	for c := range h.clients {
+ 		h.detachLocked(c)
+ 	}
+ }
+@@ -134,7 +143,7 @@ func (h *hub) send(c *peer, p protocol.Packet) {
+ func (h *hub) publish(c *peer, text string) error {
+ 	h.mu.Lock()
+ 	defer h.mu.Unlock()
+-	if h.clients[c.key] != c {
++	if _, ok := h.clients[c]; !ok {
+ 		return errors.New("client is no longer connected")
+ 	}
+ 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+@@ -147,3 +156,32 @@ func (h *hub) publish(c *peer, text string) error {
+ 	h.broadcastLocked(protocol.Packet{Type: "message", Message: &m})
+ 	return nil
+ }
++
++// Evict a revoked session immediately in this server process; database
++// validation on each ping/chat also protects against other server processes.
++func (h *hub) evictSession(username, digest string) {
++	h.mu.Lock()
++	defer h.mu.Unlock()
++	changed := false
++	for c := range h.clients {
++		if c.key == strings.ToLower(username) && c.tokenHash == digest {
++			changed = h.detachLocked(c) || changed
++		}
++	}
++	if changed {
++		h.presenceLocked()
++	}
++}
++func (h *hub) evictUser(username string) {
++	h.mu.Lock()
++	defer h.mu.Unlock()
++	changed := false
++	for c := range h.clients {
++		if c.key == strings.ToLower(username) {
++			changed = h.detachLocked(c) || changed
++		}
++	}
++	if changed {
++		h.presenceLocked()
++	}
++}
+diff --git a/internal/server/server.go b/internal/server/server.go
+index d6c692e..879588b 100644
+--- a/internal/server/server.go
++++ b/internal/server/server.go
+@@ -2,6 +2,8 @@ package server
+ 
+ import (
+ 	"context"
++	"crypto/sha256"
++	"encoding/hex"
+ 	"errors"
+ 	"fmt"
+ 	"io"
+@@ -19,10 +21,11 @@ type Server struct {
+ 	logger          *log.Logger
+ 	pending         chan struct{}
+ 	passwordWorkers chan struct{}
++	attempts        *attemptLimiter
+ }
+ 
+ func New(store Store, logger *log.Logger) *Server {
+-	return &Server{hub: newHub(store, logger), logger: logger, pending: make(chan struct{}, 32), passwordWorkers: make(chan struct{}, 3)}
++	return &Server{hub: newHub(store, logger), logger: logger, pending: make(chan struct{}, 32), passwordWorkers: make(chan struct{}, 3), attempts: newAttemptLimiter()}
+ }
+ func (s *Server) Shutdown() { s.hub.shutdown() }
+ 
+@@ -56,8 +59,40 @@ func (s *Server) AcceptConnection(conn net.Conn) {
+ }
+ 
+ func (s *Server) authorize(conn net.Conn, p protocol.Packet) (database.Identity, bool) {
+-	// Password hashing is deliberately concurrency-limited for a small beta.
+-	if p.Type == "register" || p.Type == "password_login" {
++	// Normal chat authentication uses the session token, never a password.
++	if p.Type == "login" {
++		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
++		defer cancel()
++		ident, err := s.hub.store.Authenticate(ctx, p.Username, p.Token)
++		if err != nil {
++			if !errors.Is(err, database.ErrInvalidSession) {
++				s.logger.Printf("login database error: %v", err)
++			}
++			_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "session expired or invalid; run sockt login"})
++			return database.Identity{}, false
++		}
++		return ident, true
++	}
++	valid := map[string]bool{
++		"register": true, "password_login": true, "recover": true,
++		"account_password": true, "account_codes": true,
++		"account_sessions": true, "account_revoke": true, "account_logout": true,
++	}
++	if !valid[p.Type] || !protocol.ValidUsername(p.Username) {
++		_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "invalid account request"})
++		return database.Identity{}, false
++	}
++	if p.DeviceLabel != "" && !protocol.ValidDeviceLabel(p.DeviceLabel) {
++		_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "invalid device name"})
++		return database.Identity{}, false
++	}
++	// Password hashing and one-time recovery operations share a bounded pool.
++	needsWorker := p.Type == "register" || p.Type == "password_login" || p.Type == "recover" || p.Type == "account_password" || p.Type == "account_codes"
++	if needsWorker {
++		if !s.attempts.allow(p.Username) {
++			_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "too many attempts; try again later"})
++			return database.Identity{}, false
++		}
+ 		select {
+ 		case s.passwordWorkers <- struct{}{}:
+ 			defer func() { <-s.passwordWorkers }()
+@@ -65,58 +100,79 @@ func (s *Server) authorize(conn net.Conn, p protocol.Packet) (database.Identity,
+ 			_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "server busy; try again shortly"})
+ 			return database.Identity{}, false
+ 		}
+-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+-		defer cancel()
+-		if !protocol.ValidUsername(p.Username) {
+-			_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "invalid username"})
+-			return database.Identity{}, false
+-		}
+-		var token string
+-		var err error
+-		switch p.Type {
+-		case "register":
+-			token, err = s.hub.store.Register(ctx, p.Username, p.Invite, p.Password)
+-		case "password_login":
+-			token, err = s.hub.store.PasswordLogin(ctx, p.Username, p.Password)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
++	defer cancel()
++	var response protocol.Packet
++	var err error
++	switch p.Type {
++	case "register":
++		var codes []string
++		response.Token, codes, err = s.hub.store.Register(ctx, p.Username, p.Invite, p.Password, p.DeviceLabel)
++		response.RecoveryCodes = codes
++		response.Type = "authenticated"
++	case "password_login":
++		response.Token, err = s.hub.store.PasswordLoginDevice(ctx, p.Username, p.Password, p.DeviceLabel)
++		response.Type = "authenticated"
++	case "recover":
++		response.Token, response.RecoveryCodes, err = s.hub.store.RecoverPassword(ctx, p.Username, p.RecoveryCode, p.NewPassword, p.DeviceLabel)
++		response.Type = "authenticated"
++	case "account_password":
++		response.Token, err = s.hub.store.ChangePassword(ctx, p.Username, p.Token, p.Password, p.NewPassword, p.DeviceLabel)
++		response.Type = "authenticated"
++	case "account_codes":
++		response.RecoveryCodes, err = s.hub.store.GenerateRecoveryCodes(ctx, p.Username, p.Token, p.Password)
++		response.Type = "recovery_codes"
++	case "account_sessions":
++		response.Sessions, err = s.hub.store.ListSessions(ctx, p.Username, p.Token)
++		response.Type = "sessions"
++	case "account_revoke":
++		var revoked bool
++		revoked, err = s.hub.store.RevokeSession(ctx, p.Username, p.Token, p.SessionID)
++		if err == nil && revoked {
++			s.hub.evictSession(p.Username, p.SessionID)
+ 		}
+-		if err != nil {
+-			message := "registration or login failed"
+-			if errors.Is(err, database.ErrInvalidCredentials) {
+-				message = "invalid username or password"
+-			}
+-			if errors.Is(err, database.ErrInvalidInvite) {
+-				message = "invite invalid, used or for another username"
+-			}
+-			if errors.Is(err, database.ErrUsernameUnavailable) {
+-				message = "username already registered"
+-			}
+-			if p.Type == "register" && (len(p.Password) < 12 || len(p.Password) > 128) {
+-				message = "password must be 12-128 bytes"
+-			}
+-			if message == "registration or login failed" {
+-				s.logger.Printf("account operation failed: %v", err)
+-			}
+-			_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: message})
+-			return database.Identity{}, false
++		response.Type = "ok"
++	case "account_logout":
++		err = s.hub.store.Logout(ctx, p.Username, p.Token)
++		if err == nil {
++			hash := sha256.Sum256([]byte(p.Token))
++			s.hub.evictSession(p.Username, hex.EncodeToString(hash[:]))
+ 		}
+-		_ = protocol.Write(conn, protocol.Packet{Type: "authenticated", Username: p.Username, Token: token})
+-		return database.Identity{}, false // One-shot account handshake; close afterwards.
++		response.Type = "ok"
+ 	}
+-	if p.Type != "login" {
+-		_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "expected login, register or password_login"})
+-		return database.Identity{}, false
+-	}
+-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+-	defer cancel()
+-	ident, err := s.hub.store.Authenticate(ctx, p.Username, p.Token)
+ 	if err != nil {
+-		if !errors.Is(err, database.ErrInvalidSession) {
+-			s.logger.Printf("login database error: %v", err)
++		message := "account operation failed"
++		switch {
++		case errors.Is(err, database.ErrInvalidCredentials):
++			message = "invalid username or password"
++		case errors.Is(err, database.ErrInvalidInvite):
++			message = "invite invalid, used or for another username"
++		case errors.Is(err, database.ErrInvalidSession):
++			message = "session expired or invalid; run sockt login"
++		case errors.Is(err, database.ErrInvalidRecoveryCode):
++			message = "invalid or already used recovery code"
++		case errors.Is(err, database.ErrUsernameUnavailable):
++			message = "username already registered"
++		case p.Type == "register" && (len(p.Password) < 12 || len(p.Password) > 128):
++			message = "password must be 12-128 bytes"
++		case (p.Type == "recover" || p.Type == "account_password") && (len(p.NewPassword) < 12 || len(p.NewPassword) > 128):
++			message = "new password must be 12-128 bytes"
++		default:
++			s.logger.Printf("account operation failed: %v", err)
+ 		}
+-		_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "session expired or invalid; run sockt login"})
++		_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: message})
+ 		return database.Identity{}, false
+ 	}
+-	return ident, true
++	if needsWorker {
++		s.attempts.reset(p.Username)
++	}
++	if p.Type == "account_password" || p.Type == "recover" {
++		s.hub.evictUser(p.Username)
++	}
++	_ = protocol.Write(conn, response)
++	// The account connection closes after one response; it never joins chat.
++	return database.Identity{}, false
+ }
+ func (s *Server) handleClient(conn net.Conn) {
+ 	defer conn.Close()
+@@ -137,7 +193,8 @@ func (s *Server) handleClient(conn net.Conn) {
+ 	if !valid {
+ 		return
+ 	}
+-	c := &peer{identity: ident, key: strings.ToLower(ident.Username), conn: conn, outgoing: make(chan protocol.Packet, 256)}
++	digest := sha256.Sum256([]byte(login.Token))
++	c := &peer{identity: ident, key: strings.ToLower(ident.Username), tokenHash: hex.EncodeToString(digest[:]), conn: conn, outgoing: make(chan protocol.Packet, 256)}
+ 	history, lastID, err := s.hub.register(c, login.SinceID)
+ 	if err != nil {
+ 		_ = protocol.Write(conn, protocol.Packet{Type: "error", Text: "could not join room: " + err.Error()})
+@@ -174,6 +231,15 @@ func (s *Server) handleClient(conn net.Conn) {
+ 			}
+ 			return
+ 		}
++		if packet.Type == "ping" || packet.Type == "chat" {
++			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
++			_, authErr := s.hub.store.Authenticate(ctx, ident.Username, login.Token)
++			cancel()
++			if authErr != nil {
++				// The dedicated writer owns this connection now; closing it forces a clean re-login.
++				return
++			}
++		}
+ 		switch packet.Type {
+ 		case "ping":
+ 			s.hub.send(c, protocol.Packet{Type: "pong"})
+diff --git a/internal/server/server_test.go b/internal/server/server_test.go
+index f4a8908..7b0ffbf 100644
+--- a/internal/server/server_test.go
++++ b/internal/server/server_test.go
+@@ -30,12 +30,40 @@ func (s *fakeStore) Authenticate(_ context.Context, name, token string) (databas
+ 	}
+ 	return database.Identity{}, database.ErrInvalidSession
+ }
+-func (s *fakeStore) Register(_ context.Context, user, invite, password string) (string, error) {
++func (s *fakeStore) Register(_ context.Context, user, invite, password, device string) (string, []string, error) {
+ 	if user != "Paulos" || invite != "invitation" || len(password) < 12 {
+-		return "", database.ErrInvalidInvite
++		return "", nil, database.ErrInvalidInvite
+ 	}
+-	return "a-new-session-token", nil
++	return "a-new-session-token", []string{"CODE1", "CODE2", "CODE3", "CODE4", "CODE5", "CODE6", "CODE7", "CODE8"}, nil
++}
++func (s *fakeStore) PasswordLoginDevice(ctx context.Context, user, password, device string) (string, error) {
++	return s.PasswordLogin(ctx, user, password)
++}
++func (s *fakeStore) GenerateRecoveryCodes(_ context.Context, user, token, password string) ([]string, error) {
++	if user != "Paulos" || password != "correctpassword" {
++		return nil, database.ErrInvalidCredentials
++	}
++	return []string{"CODE1", "CODE2", "CODE3", "CODE4", "CODE5", "CODE6", "CODE7", "CODE8"}, nil
++}
++func (s *fakeStore) ChangePassword(_ context.Context, user, token, oldPassword, newPassword, device string) (string, error) {
++	if user != "Paulos" || oldPassword != "correctpassword" {
++		return "", database.ErrInvalidCredentials
++	}
++	return "another-session-token", nil
++}
++func (s *fakeStore) RecoverPassword(_ context.Context, user, code, newPassword, device string) (string, []string, error) {
++	if user != "Paulos" || code != "CODE1" {
++		return "", nil, database.ErrInvalidRecoveryCode
++	}
++	return "another-session-token", []string{"NEW1", "NEW2", "NEW3", "NEW4", "NEW5", "NEW6", "NEW7", "NEW8"}, nil
++}
++func (s *fakeStore) ListSessions(_ context.Context, user, token string) ([]protocol.SessionInfo, error) {
++	return []protocol.SessionInfo{{ID: strings.Repeat("a", 64), Device: "Test PC", Current: true}}, nil
++}
++func (s *fakeStore) RevokeSession(_ context.Context, user, token, target string) (bool, error) {
++	return true, nil
+ }
++func (s *fakeStore) Logout(_ context.Context, user, token string) error { return nil }
+ func (s *fakeStore) PasswordLogin(_ context.Context, user, password string) (string, error) {
+ 	if user != "Paulos" || password != "correctpassword" {
+ 		return "", database.ErrInvalidCredentials
+@@ -228,3 +256,53 @@ func TestRegistrationAndPasswordLoginHandshake(t *testing.T) {
+ 		}
+ 	}
+ }
++
++func TestOneAccountCanConnectFromTwoDevices(t *testing.T) {
++	addr, stop := launch(t, &fakeStore{})
++	defer stop()
++	first, _ := connect(t, addr, "Paulos", "a-token")
++	second, _ := connect(t, addr, "Paulos", "a-token")
++	if err := protocol.Write(first.conn, protocol.Packet{Type: "chat", Text: "two devices"}); err != nil {
++		t.Fatal(err)
++	}
++	for _, w := range []*wire{first, second} {
++		p := readType(t, w, "message")
++		if p.Message == nil || p.Message.Text != "two devices" {
++			t.Fatalf("device did not receive message: %+v", p)
++		}
++	}
++}
++
++func TestAccountOperationsUseOneShotConnections(t *testing.T) {
++	addr, stop := launch(t, &fakeStore{})
++	defer stop()
++	cases := []struct {
++		request protocol.Packet
++		expect  string
++	}{
++		{protocol.Packet{Type: "register", Username: "Paulos", Password: "correctpassword", Invite: "invitation", DeviceLabel: "Windows PC"}, "authenticated"},
++		{protocol.Packet{Type: "password_login", Username: "Paulos", Password: "correctpassword", DeviceLabel: "Linux device"}, "authenticated"},
++		{protocol.Packet{Type: "account_sessions", Username: "Paulos", Token: "a-token"}, "sessions"},
++		{protocol.Packet{Type: "account_codes", Username: "Paulos", Token: "a-token", Password: "correctpassword"}, "recovery_codes"},
++		{protocol.Packet{Type: "recover", Username: "Paulos", RecoveryCode: "CODE1", NewPassword: "next-password-123", DeviceLabel: "Windows PC"}, "authenticated"},
++	}
++	for _, tt := range cases {
++		c, err := net.Dial("tcp", addr)
++		if err != nil {
++			t.Fatal(err)
++		}
++		tt.request.Version = protocol.Version
++		if err = protocol.Write(c, tt.request); err != nil {
++			t.Fatal(err)
++		}
++		_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
++		p, err := protocol.Read(protocol.NewScanner(c))
++		c.Close()
++		if err != nil || p.Type != tt.expect {
++			t.Fatalf("operation %s: %+v %v", tt.request.Type, p, err)
++		}
++		if p.Type == "recovery_codes" && len(p.RecoveryCodes) != 8 {
++			t.Fatal("missing recovery codes")
++		}
++	}
++}
+diff --git a/internal/tui/model.go b/internal/tui/model.go
+index 26bd633..296657c 100644
+--- a/internal/tui/model.go
++++ b/internal/tui/model.go
+@@ -43,6 +43,7 @@ type Model struct {
+ 	style                 string
+ 	quiet                 bool
+ 	help                  bool
++	accountRequested      bool
+ 	updateServer          string
+ 	updateOffer           *updater.Offer
+ 	updateStage           string
+@@ -108,7 +109,8 @@ func downloadUpdate(offer updater.Offer) tea.Cmd {
+ 
+ // UpgradePath is nonempty only after a verified update was staged and the TUI
+ // voluntarily exited. The CLI installs and restarts outside alternate screen.
+-func (m Model) UpgradePath() string { return m.updateStagedPath }
++func (m Model) UpgradePath() string    { return m.updateStagedPath }
++func (m Model) AccountRequested() bool { return m.accountRequested }
+ 
+ func (m Model) Init() tea.Cmd {
+ 	cmds := []tea.Cmd{waitForNetwork(m.events)}
+@@ -228,6 +230,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+ 			return m, nil
+ 		case "ctrl+c":
+ 			return m, tea.Quit
++		case "ctrl+p":
++			m.accountRequested = true
++			return m, tea.Quit
+ 		case "f1":
+ 			m.help = !m.help
+ 			return m, nil
+@@ -246,6 +251,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+ 			if text == "/exit" {
+ 				return m, tea.Quit
+ 			}
++			if text == "/account" {
++				m.accountRequested = true
++				return m, tea.Quit
++			}
+ 			if text == "/help" {
+ 				m.help = true
+ 				m.composer.SetValue("")
+@@ -301,12 +310,12 @@ func (m Model) footer() string {
+ 	case "downloading":
+ 		return brandStyle.Render(trimCells("Downloading and verifying update…", m.width))
+ 	}
+-	hint := "Enter send · F1 help · PgUp/PgDn scroll · Ctrl+C quit"
++	hint := "Enter send · F1 help · Ctrl+P account · PgUp/PgDn · Ctrl+C quit"
+ 	if m.width < 61 {
+-		hint = "Enter send · F1 help · Ctrl+C quit"
++		hint = "Enter send · F1 help · Ctrl+P account · Ctrl+C quit"
+ 	}
+ 	if m.width < 42 {
+-		hint = "F1 help · Ctrl+C quit"
++		hint = "F1 help · Ctrl+P account · Ctrl+C quit"
+ 	}
+ 	// Only draw extra status when it conveys something beyond ordinary uptime.
+ 	if m.status != "Connected" && m.status != "" {
+@@ -335,7 +344,7 @@ func (m Model) View() tea.View {
+ 	separator := lineStyle.Render(strings.Repeat("─", width))
+ 	rows := m.chatRows(width)
+ 	if m.help {
+-		rows = append(rows, "", brandStyle.Render("Keyboard shortcuts"), labelStyle.Render("Enter   send message"), labelStyle.Render("PgUp    older messages"), labelStyle.Render("PgDn    newer messages"), labelStyle.Render("F1      close help"), labelStyle.Render("F2      install available update"), labelStyle.Render("/exit   leave Sockt"))
++		rows = append(rows, "", brandStyle.Render("Keyboard shortcuts"), labelStyle.Render("Enter   send message"), labelStyle.Render("PgUp    older messages"), labelStyle.Render("PgDn    newer messages"), labelStyle.Render("F1      close help"), labelStyle.Render("F2      install available update"), labelStyle.Render("Ctrl+P  account management"), labelStyle.Render("/account account management"), labelStyle.Render("/exit   leave Sockt"))
+ 	}
+ 	h := max(3, height-5)
+ 	end := max(0, len(rows)-m.scroll)
+diff --git a/internal/tui/model_test.go b/internal/tui/model_test.go
+index 0b19cbf..91f7a54 100644
+--- a/internal/tui/model_test.go
++++ b/internal/tui/model_test.go
+@@ -1,6 +1,7 @@
+ package tui
+ 
+ import (
++	tea "charm.land/bubbletea/v2"
+ 	"testing"
+ 	"time"
+ 
+@@ -35,3 +36,11 @@ func TestReconnectHistoryRemainsOrderedAndUnique(t *testing.T) {
+ 		t.Fatalf("replayed history was duplicated or misordered: %+v", m.history)
+ 	}
+ }
++
++func TestAccountShortcutRequestsMenu(t *testing.T) {
++	m := Model{width: 80, height: 24}
++	next, _ := m.Update(tea.KeyPressMsg("ctrl+p"))
++	if !next.(Model).AccountRequested() {
++		t.Fatal("Ctrl+P didn't open account management")
++	}
++}
+diff --git a/internal/updater/updater.go b/internal/updater/updater.go
+index 2e3f41a..8de90d3 100644
+--- a/internal/updater/updater.go
++++ b/internal/updater/updater.go
+@@ -26,7 +26,7 @@ import (
+ // Inject PublicKeyHex when building distributable clients using -ldflags.
+ // Development builds deliberately disable auto-updates if no key is supplied.
+ var PublicKeyHex = ""
+-var CurrentVersion = "0.8.0"
++var CurrentVersion = "0.9.0"
+ 
+ const MaxManifestBytes = 32 * 1024
+ const MaxBinaryBytes int64 = 100 << 20
+diff --git a/scripts/build.ps1 b/scripts/build.ps1
+index 42c0f7d..63e242e 100644
+--- a/scripts/build.ps1
++++ b/scripts/build.ps1
+@@ -2,7 +2,7 @@
+ $ErrorActionPreference = "Stop"
+ New-Item -ItemType Directory -Force dist | Out-Null
+ $releaseKey = $env:SOCKT_UPDATE_PUBLIC_KEY
+-$releaseVersion = if ($env:SOCKT_RELEASE_VERSION) { $env:SOCKT_RELEASE_VERSION } else { "0.8.0" }
++$releaseVersion = if ($env:SOCKT_RELEASE_VERSION) { $env:SOCKT_RELEASE_VERSION } else { "0.9.0" }
+ $ldflags = "-s -w -X sockt/internal/updater.PublicKeyHex=$releaseKey -X sockt/internal/updater.CurrentVersion=$releaseVersion"
+ $env:CGO_ENABLED = "0"
+ try {
+diff --git a/scripts/build.sh b/scripts/build.sh
+index 064fb1b..af6d396 100755
+--- a/scripts/build.sh
++++ b/scripts/build.sh
+@@ -4,7 +4,7 @@ mkdir -p dist
+ # Leave unset for local development; production releases MUST use the stable
+ # public key generated once using `sockt-release keygen`.
+ release_key="${SOCKT_UPDATE_PUBLIC_KEY:-}"
+-release_version="${SOCKT_RELEASE_VERSION:-0.8.0}"
++release_version="${SOCKT_RELEASE_VERSION:-0.9.0}"
+ ldflags="-s -w -X sockt/internal/updater.PublicKeyHex=$release_key -X sockt/internal/updater.CurrentVersion=$release_version"
+ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="$ldflags" -o dist/sockt-windows-amd64.exe ./cmd/sockt
+ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o dist/sockt-updater-windows-amd64.exe ./cmd/sockt-updater

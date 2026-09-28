@@ -12,13 +12,14 @@ import (
 )
 
 type Config struct {
-	Version  int    `json:"version"`
-	Server   string `json:"server"`
-	Username string `json:"username"`
-	Token    string `json:"token"`
-	LastSeen int64  `json:"last_seen"`
-	Style    string `json:"style"`
-	Quiet    bool   `json:"quiet"`
+	Version     int    `json:"version"`
+	Server      string `json:"server"`
+	Username    string `json:"username"`
+	Token       string `json:"token"`
+	LastSeen    int64  `json:"last_seen"`
+	Style       string `json:"style"`
+	Quiet       bool   `json:"quiet"`
+	DeviceLabel string `json:"device_label,omitempty"`
 }
 type Store struct {
 	mu    sync.Mutex
@@ -34,7 +35,7 @@ func Path() (string, error) {
 	return filepath.Join(dir, "sockt", "config.json"), nil
 }
 func Open(path string) (*Store, error) {
-	c := Config{Style: "minimal", Quiet: true, Server: LocalURL}
+	c := Config{Style: "minimal", Quiet: true, Server: DefaultRemoteURL}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return &Store{path: path, Value: c}, nil

@@ -1,92 +1,89 @@
-# Sockt v0.7 — terminal messaging over secure WebSockets
+# Sockt v0.9 — invitation-only terminal messenger
 
-Sockt is a compact, terminal-first messenger with a Go/Bubble Tea client and an invite-only Go server. **v0.7 switches from raw TCP to WebSockets** so it can share your existing Hetzner HTTPS infrastructure with your Next.js website. PostgreSQL stores accounts, invitations, sessions, conversations and messages. v0.7 supports **one general room**; friends, private DMs, groups and replies are roadmap items, **not** present in this release.
+Sockt is a compact Go/Bubble Tea terminal chat app. The Go server runs behind a
+trusted HTTPS reverse proxy, accepts authenticated WebSocket connections and
+stores accounts, sessions and messages in PostgreSQL. v0.9 adds self-service
+account recovery and management while keeping the app **invitation-only**, with
+**no mandatory email**.
 
-## What changed
+## New in v0.9
 
-- Remote clients use `wss://chat.yourdomain.com/ws` (valid TLS certificate required).
-- Local development uses `ws://127.0.0.1:8080/ws`; `ws://` to non-loopback hosts is rejected.
-- The server binds to `127.0.0.1:8080` (cannot bind to public IP); your existing Nginx/Caddy reverse proxy terminates HTTPS.
-- The v0.6 database and JSON packet shape are unchanged, and the client keeps minimal/classic chat UI, authentication and reconnection.
-- No Tailscale required. Don't expose PostgreSQL 5432 or Sockt's loopback HTTP port 8080 publicly.
+- New users register with a username-specific one-time invitation and password.
+  Registration creates **eight single-use recovery codes** to store privately.
+- Existing users can generate recovery codes with `sockt account` and their
+  current password; generating new codes invalidates all earlier ones.
+- Forgot your password? `sockt recover` uses a single unused recovery code to
+  reset it, revokes every old session and issues a new recovery-code set.
+- Manage active device sessions, revoke any session, change passwords, or log
+  out the current device. Two devices can now chat using the **same username**.
+  Presence counts unique usernames rather than connected sessions.
+- Press `Ctrl+P`, or type `/account`, to open the account-management menu from
+  the chat UI. The menu uses secure terminal password prompts outside the TUI.
+- Preserves the signed, opt-in v0.8 client updater and existing chat protocol.
+  There is no database modification to message content or chat-history IDs.
 
-## Structure
+## Upgrading a running server
 
-```
-sockt/
-├── cmd/sockt/                    # Windows/Linux terminal client entry point
-├── cmd/socktd/                   # Server + administration commands
-├── internal/client/              # Register/login, reconnect and event processing
-├── internal/config/              # WSS URL validation; local user profile
-├── internal/database/            # PostgreSQL, Argon2id auth, embedded migrations
-│   └── migrations/
-├── internal/protocol/            # Shared newline-delimited JSON packets
-├── internal/server/              # Authenticated server hub / broadcast
-├── internal/transport/           # WebSocket dial and HTTP upgrade adapter
-├── internal/tui/                 # Bubble Tea minimal/classic UI
-├── deploy/hetzner/              # Private PostgreSQL Compose + deployment guide
-├── deploy/proxy/                # Caddy & Nginx separate-subdomain examples
-├── deploy/systemd/              # Linux service + protected environment sample
-├── docs/                        # Architecture and wire protocol
-├── scripts/                     # Windows/Linux binaries
-├── compose.yaml                 # Local PostgreSQL
-├── .env.example
-└── go.mod
+**Do not deploy the v0.9 client before the v0.9 server.** The server must first
+apply the additive Neon PostgreSQL migration `002_accounts.up.sql`. It preserves
+existing users, passwords, messages, invitations and sessions. Read the full
+**[v0.9 Hetzner/Neon/PM2 deployment guide](docs/ACCOUNTS-v09.md)** and
+[the short upgrade overview](UPGRADE-v08.md) before updating production.
+
+Keep your current v0.8 Ed25519 release signing key. **Don't regenerate it** when
+publishing the v0.9 client. The existing Nginx routes at `/ws` and `/updates`
+remain unchanged. For client update publishing, see
+[the updater guide](docs/UPDATES.md).
+
+## Main commands
+
+```text
+sockt                 Launch the chat
+sockt setup           Register, log in, or recover an account
+sockt login           Login with username and password
+sockt recover         Reset a forgotten password with one unused recovery code
+sockt account         Sessions, revoke, password change, recovery-code rotation
+sockt logout          Log out and revoke this device's session
+sockt version         Print the client version
+socktd migrate        Apply SQL migrations (operator, on server)
+socktd invite USER    Create a single-use, username-bound invitation
+socktd serve          Start the WebSocket server (PM2 on Hetzner)
 ```
 
 ## Local development
 
-Requires Go 1.25+ and Docker Compose (the existing v0.6 Go dependencies remain). From the repository root:
+Install the Go version specified by `go.mod` and Docker Compose if using the
+bundled local PostgreSQL container. The production database belongs in Neon
+and must not be used for automated integration tests.
 
-```powershell
-# Create .env from .env.example with a NEW password that matches both values.
+```bash
+# From the repository root. Configure .env with your local database password.
 docker compose up -d
 go mod tidy
-$env:DATABASE_URL = "postgres://sockt_dev:YOUR_PASSWORD@127.0.0.1:5432/sockt?sslmode=disable"
+go vet ./...
+go test ./...
+go build ./...
+# Set DATABASE_URL in your shell or protected .env loader, then:
 go run ./cmd/socktd migrate
-go run ./cmd/socktd invite Paulos
-# Save the displayed one-time token. Then start Sockt:
+go run ./cmd/socktd invite TestUser
 go run ./cmd/socktd serve
 ```
 
-In a **second** PowerShell terminal:
+Run `go run ./cmd/sockt setup` in another terminal with
+`ws://127.0.0.1:8080/ws` to test local registration. The new-client default is
+`wss://chat.dpaulos.pt/ws` for the hosted beta, but the setup prompt lets you
+enter a different secure server address.
 
-```powershell
-go run ./cmd/sockt setup
-# Server: ws://127.0.0.1:8080/ws
-# Register, enter the invitation, choose a password.
-go run ./cmd/sockt
-```
+For PostgreSQL integration tests, create an **isolated disposable database**
+and set `SOCKT_TEST_DATABASE_URL`. Never set that variable to your real Neon
+production branch: the test suite deliberately creates example accounts.
 
-For an existing account, choose **login** rather than register in the setup wizard. If an initial setup already completed, just run `sockt` (or `go run ./cmd/sockt`). To test with a second account, use another OS login (Sockt keeps one profile per OS user).
+## Scope and security
 
-### Run checks and build binaries
-
-```powershell
-go mod tidy
-go fmt ./...
-go vet ./...
-go test ./...
-.\scripts\build.ps1
-```
-
-Use `scripts/build.sh` on Linux/macOS. `go.sum` is generated by `go mod tidy` when the real Go modules are available; commit it to your own repository.
-
-## Hetzner deployment without Tailscale
-
-Read **[deploy/hetzner/README.md](deploy/hetzner/README.md)** and **[UPGRADE-v06.md](UPGRADE-v06.md)** if you have existing v0.6 accounts/messages. Use a separate `chat.yourdomain.com` HTTPS vhost pointing **only** `/ws` to the loopback server at `127.0.0.1:8080`. See `deploy/proxy/` for Caddy and Nginx examples; merge them into your actual existing proxy configuration rather than replacing your Next.js site. Your friends install only the client binary and enter the WSS URL, username, invite and password.
-
-### Administration commands
-
-```text
-socktd migrate             Apply PostgreSQL migrations
-socktd invite USERNAME     Generate one one-time account invite
-socktd import-json --file old/messages.json   One-time pre-v0.6 import ONLY
-socktd serve --listen 127.0.0.1:8080          Run loopback WebSocket server
-```
-
-All admin commands require the real `DATABASE_URL` via the process environment; do not commit it. Public WS status checks are not authentication tests; test client register/login and live messaging after deployment.
-
-## Important security boundaries
-
-This is an **invite-only beta**. HTTPS/WSS encrypts transit, **not** messages at rest or end-to-end; the server can access PostgreSQL message content. The session token is stored in a user-only local JSON config (not the OS keychain). Do not share config directories or use untrusted shared PCs. There is no password-reset, token-revocation UI, public abuse moderation or independent security audit. Limit invite distribution and monitor service logs/connection behavior before sharing broadly. Test backups and restores; a Docker volume alone is not a backup.
+v0.9 has one shared general conversation. Friends, DMs, groups, optional
+verified email, password-reset emails, MFA, and OS credential-vault integration
+remain future work. Tokens are currently saved in a user-only local config
+file. Passwords are Argon2id-hashed; server-side recovery codes are only hashed
+and single-use. Public remote connections must use `wss://`. Sockt does **not**
+provide end-to-end encryption: the server and database administrator can access
+stored messages. Limit invitations to trusted users while this is a beta.
