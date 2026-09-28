@@ -35,8 +35,8 @@ func main() {
 			}
 			// Go's nil stdio defaults to NUL. Explicitly attach the restarted
 			// TUI to THIS helper's newly allocated Windows console.
-			conIn, inErr := os.OpenFile("CONIN$", os.O_RDONLY, 0)
-			conOut, outErr := os.OpenFile("CONOUT$", os.O_WRONLY, 0)
+			conIn, inErr := os.OpenFile("CONIN$", os.O_RDWR, 0)
+			conOut, outErr := os.OpenFile("CONOUT$", os.O_RDWR, 0)
 			if inErr != nil || outErr != nil {
 				fmt.Fprintln(os.Stderr, "Installed update but could not open a console; launch Sockt manually.", inErr, outErr)
 				time.Sleep(8 * time.Second)
