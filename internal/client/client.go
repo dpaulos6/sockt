@@ -38,6 +38,7 @@ type Client struct {
 	addr, username, token string
 	incoming              chan Event
 	done                  chan struct{}
+	stopped               chan struct{}
 	once                  sync.Once
 	mu                    sync.RWMutex
 	current               *session
@@ -46,12 +47,19 @@ type Client struct {
 }
 
 func New(addr, username, token string, lastSeen int64, onSeen func(int64)) *Client {
-	c := &Client{addr: addr, username: username, token: token, incoming: make(chan Event, 512), done: make(chan struct{}), onSeen: onSeen}
+	c := &Client{addr: addr, username: username, token: token, incoming: make(chan Event, 512), done: make(chan struct{}), stopped: make(chan struct{}), onSeen: onSeen}
 	c.lastSeen.Store(lastSeen)
 	go c.run()
 	return c
 }
 func (c *Client) Incoming() <-chan Event { return c.incoming }
+
+// CloseAndWait is used before replacing credentials, so an old reader cannot
+// persist a history cursor after logout has cleared it.
+func (c *Client) CloseAndWait() {
+	c.Close()
+	<-c.stopped
+}
 func (c *Client) Close() {
 	c.once.Do(func() {
 		close(c.done)
@@ -103,6 +111,7 @@ func (c *Client) remember(id int64) {
 	}
 }
 func (c *Client) run() {
+	defer close(c.stopped)
 	defer close(c.incoming)
 	backoff := time.Second
 	for {

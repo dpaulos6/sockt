@@ -10,7 +10,7 @@ type slashCommand struct {
 }
 
 var slashCommands = []slashCommand{
-	{Name: "/account", Description: "Manage your account"},
+	{Name: "/account", Description: "Open Account · Esc returns to chat"},
 	{Name: "/help", Description: "Show keyboard shortcuts"},
 	{Name: "/update", Description: "Check for or install an update"},
 	{Name: "/exit", Description: "Leave Sockt"},

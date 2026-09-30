@@ -27,6 +27,31 @@ type Store struct {
 	Value Config
 }
 
+// Snapshot and SetToken serialize account changes with background history saves.
+func (s *Store) Snapshot() Config {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Value
+}
+
+func (s *Store) SetToken(token string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.Value
+	c.Token = token
+	if token == "" {
+		c.LastSeen = 0
+	}
+	if err := write(s.path, c); err != nil {
+		// The server may already have invalidated the old token. Fail closed
+		// in memory even when the credential file cannot be replaced.
+		s.Value.Token = ""
+		return err
+	}
+	s.Value = c
+	return nil
+}
+
 func Path() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {

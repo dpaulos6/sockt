@@ -17,8 +17,11 @@ account recovery and management while keeping the app **invitation-only**, with
 - Manage active device sessions, revoke any session, change passwords, or log
   out the current device. Two devices can now chat using the **same username**.
   Presence counts unique usernames rather than connected sessions.
-- Press `Ctrl+P`, or type `/account`, to open the account-management menu from
-  the chat UI. The menu uses secure terminal password prompts outside the TUI.
+- Press `Ctrl+P`, or type `/account`, to open the native Account page. Escape
+  returns to chat with the connection, draft and scroll position preserved.
+  Passwords use hidden input; recovery codes require `A` to acknowledge saving
+  them. The standalone `sockt account` retains its secure terminal prompts.
+  See [Account UI and security](docs/ACCOUNT-UI.md) for controls and limitations.
 - Preserves the signed, opt-in v0.8 client updater and existing chat protocol.
   There is no database modification to message content or chat-history IDs.
 
