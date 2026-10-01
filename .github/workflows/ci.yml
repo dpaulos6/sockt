@@ -36,4 +36,19 @@ jobs:
       - run: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o /tmp/sockt-amd64 ./cmd/sockt && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o /tmp/socktd-amd64 ./cmd/socktd
       - run: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o /tmp/sockt-arm64 ./cmd/sockt && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o /tmp/socktd-arm64 ./cmd/socktd
 
-      - run: bash deploy/hetzner/test-sockt-deploy.sh
+      - run: python3 scripts/test_release.py
+      - run: |
+          go build -o /tmp/sockt-test-signer ./cmd/sockt-release
+          sudo bash deploy/hetzner/test-sockt-deploy.sh /tmp/sockt-test-signer
+      - run: bash -n scripts/build.sh scripts/install.sh scripts/validate-release.sh deploy/hetzner/sockt-deploy
+  windows-installer:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-go@0a12ed9d6d7d0734a0e2e9026830467bd4f5c3f7
+        with: { go-version-file: go.mod, cache: true }
+      - name: PowerShell 5.1 and 7 installer cryptography and legacy upgrade
+        shell: pwsh
+        run: |
+          $env:PATH = 'C:\Program Files\Git\usr\bin;' + $env:PATH
+          python scripts/test_release.py

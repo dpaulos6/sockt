@@ -53,9 +53,9 @@ jobs:
           unzip -l dist/sockt-windows-amd64.zip | grep -F sockt-updater-windows-amd64.exe
           # Require the documented baseline; never guess an initial migration plan.
           git rev-parse --verify 'refs/tags/v0.9.2^{tag}' >/dev/null
-          previous=$(git tag --merged "$RELEASE_TAG^" --sort=-version:refname | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | head -n1)
-          test -n "$previous"
-          if git diff --quiet "$previous" "$RELEASE_TAG" -- internal/database/migrations; then echo none > dist/migration-plan; else echo required > dist/migration-plan; fi
+          git merge-base --is-ancestor v0.9.2 "$RELEASE_TAG"
+          # Conservative across skipped releases: compare with the verified baseline.
+          if git diff --quiet v0.9.2 "$RELEASE_TAG" -- internal/database/migrations; then echo none > dist/migration-plan; else echo required > dist/migration-plan; fi
           printf '%s\n%s\n%s\n' "$RELEASE_TAG" "$(git rev-parse HEAD)" "$SOCKT_UPDATE_PUBLIC_KEY" > dist/release-meta
       - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with: { name: release, path: dist/, if-no-files-found: error }
