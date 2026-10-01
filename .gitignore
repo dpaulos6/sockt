@@ -13,3 +13,5 @@
 /.idea/
 *.zip
 release-notes.md
+__pycache__/
+*.py[cod]
