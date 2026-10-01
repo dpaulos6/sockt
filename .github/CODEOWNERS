@@ -1,0 +1,5 @@
+# Replace @dpaulos6 with a team when collaborators are added.
+/.github/ @dpaulos6
+/scripts/ @dpaulos6
+/deploy/ @dpaulos6
+/SECURITY.md @dpaulos6

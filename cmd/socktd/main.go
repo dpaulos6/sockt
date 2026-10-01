@@ -15,6 +15,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"sockt/internal/buildinfo"
 	"sockt/internal/database"
 	"sockt/internal/server"
 	"sockt/internal/transport"
@@ -44,6 +45,10 @@ func safeListen(addr string) error {
 	return fmt.Errorf("Sockt v0.7 must listen on loopback behind an HTTPS reverse proxy; refusing %q", addr)
 }
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		fmt.Printf("socktd %s (%s)\n", buildinfo.Version, buildinfo.Commit)
+		return
+	}
 	sub := "serve"
 	args := os.Args[1:]
 	if len(args) > 0 {
@@ -133,7 +138,7 @@ func main() {
 			_ = httpSrv.Shutdown(ctx)
 			sockt.Shutdown() // Close upgraded chat clients (HTTP Shutdown alone doesn't).
 		}()
-		log.Printf("socktd v0.7 WebSocket endpoint ws://%s/ws (PostgreSQL)", *listen)
+		log.Printf("socktd %s (%s) WebSocket endpoint ws://%s/ws (PostgreSQL)", buildinfo.Version, buildinfo.Commit, *listen)
 		err := httpSrv.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)

@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+# Root-owned wrapper. No environment/path overrides: tests rewrite a private copy.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+unset BASH_ENV ENV CDPATH
+umask 077
+ROOT=/opt/sockt
+RELEASES="$ROOT/releases"
+BASE=/var/lib/sockt-deploy
+INCOMING="$BASE/incoming"
+STATE="$BASE/state"
+BACKUPS="$BASE/backups"
+WEB=/var/www/sockt-updates
+PUBKEY=/etc/sockt/release-public-key.pem
+MIGRATION_ENV=/etc/sockt/socktd-migrate.env
+LOCK="$STATE/deploy.lock"
+PM2=/usr/bin/pm2
+die() { echo "sockt-deploy: $*" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || die 'must run as root'
+cmd=${1:-}; shift || true
+version= commit= sha= backup= dry_run=0 allow_migrations=0
+while (($#)); do
+  case "$1" in
+    --version|--commit|--sha256|--backup-id)
+      (($#>=2)) || die 'missing argument'
+      case "$1" in --version) version=$2;; --commit) commit=$2;; --sha256) sha=$2;; --backup-id) backup=$2;; esac
+      shift 2;;
+    --allow-migrations) allow_migrations=1; shift;;
+    --dry-run) dry_run=1; shift;;
+    *) die 'invalid argument';;
+  esac
+done
+case "$cmd" in deploy|publish)
+  [[ $version =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ && $commit =~ ^[0-9a-f]{40}$ && $sha =~ ^[0-9a-f]{64}$ ]] || die 'invalid release identity';;
+  rollback|status) ;;
+  *) die 'usage: deploy|publish|rollback|status [--version vX.Y.Z --commit HEX --sha256 HEX]';;
+esac
+[[ -z $backup || $backup =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] || die 'invalid backup ID'
+# Check every ancestor, not just leaf ownership: a writable parent can replace it.
+trusted() {
+  local p=$1 mode
+  while :; do
+    [[ -e $p && ! -L $p && $(stat -c %u "$p") == 0 ]] || die "untrusted path: $p"
+    mode=$(stat -c %a "$p")
+    (( (8#$mode & 0022) == 0 )) || die "writable trusted path: $p"
+    [[ $p == / ]] && break
+    p=$(dirname "$p")
+  done
+}
+trusted "$BASE"; trusted "$ROOT"; trusted "$(dirname "$LOCK")"
+exec 9>"$LOCK"; flock -n 9 || die 'another deployment is in progress'
+for p in "$RELEASES" "$STATE" "$BACKUPS"; do
+  [[ -d $p ]] || die "provision root-owned directory first: $p"
+  trusted "$p"
+done
+work=
+cleanup() { [[ -z $work ]] || rm -rf -- "$work"; }
+trap cleanup EXIT
+assets=(sockt-windows-amd64.exe sockt-updater-windows-amd64.exe sockt-linux-amd64 sockt-linux-arm64 socktd-linux-amd64 socktd-linux-arm64 stable.json migration-plan release-meta install-sockt.ps1 install-sockt.sh sockt-windows-amd64.zip)
+snapshot() {
+  trusted "$PUBKEY"
+  work=$(mktemp -d "$STATE/stage.XXXXXX")
+  local name src
+  for name in "${assets[@]}" "sockt-$version-checksums.txt" "sockt-$version-checksums.txt.sig"; do
+    src="$INCOMING/$version/$name"
+    [[ -f $src && ! -L $src ]] || die 'missing or symlinked artifact'
+    cp -P -- "$src" "$work/$name"
+    [[ -f $work/$name && ! -L $work/$name ]] || die 'artifact changed during copy'
+    chmod 0600 "$work/$name"
+  done
+  openssl pkeyutl -verify -pubin -inkey "$PUBKEY" -rawin -in "$work/sockt-$version-checksums.txt" -sigfile "$work/sockt-$version-checksums.txt.sig" >/dev/null 2>&1 || die 'invalid checksum signature'
+  # Exact ordered allowlist prevents signed path traversal and omitted assets.
+  local i=0 hash name extra
+  while read -r hash name extra; do
+    ((i<${#assets[@]})) || die 'extra checksum entry'
+    [[ $hash =~ ^[0-9a-f]{64}$ && $name == "${assets[i]}" && -z $extra ]] || die 'invalid checksum entry'
+    [[ $(sha256sum "$work/$name" | cut -d' ' -f1) == "$hash" ]] || die 'artifact checksum mismatch'
+    i=$((i+1))
+  done < "$work/sockt-$version-checksums.txt"
+  ((i==${#assets[@]})) || die 'missing checksum entry'
+  [[ $(sha256sum "$work/socktd-linux-amd64" | cut -d' ' -f1) == "$sha" ]] || die 'server checksum mismatch'
+  [[ $(sed -n '1p' "$work/release-meta") == "$version" && $(sed -n '2p' "$work/release-meta") == "$commit" ]] || die 'signed release identity mismatch'
+}
+health() {
+  local i
+  for i in {1..20}; do
+    if curl --fail --silent --max-time 3 http://127.0.0.1:8080/healthz | grep -qx ok; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
+restart() { /usr/sbin/runuser -u paulos -- "$PM2" restart socktd --update-env >/dev/null 2>&1; }
+activate() {
+  ln -s -- "$1" "$ROOT/socktd.next" &&
+    mv -Tf -- "$ROOT/socktd.next" "$ROOT/socktd"
+}
+record() {
+  printf '%s\n%s\n' "$1" "$2" > "$STATE/$3.next" &&
+    mv -Tf "$STATE/$3.next" "$STATE/$3" && sync -f "$STATE"
+}
+verify_target() {
+  [[ $1 == "$RELEASES/"* && -f $1 && -x $1 && ! -L $1 && $2 =~ ^[0-9a-f]{64}$ ]] || die 'invalid rollback target'
+  trusted "$1"
+  [[ $(sha256sum "$1" | cut -d' ' -f1) == "$2" ]] || die 'rollback checksum mismatch'
+}
+restore() {
+  local previous hash
+  trusted "$STATE/previous"
+  previous=$(sed -n '1p' "$STATE/previous"); hash=$(sed -n '2p' "$STATE/previous")
+  verify_target "$previous" "$hash"
+  # restore is called in a conditional, where Bash disables implicit errexit.
+  # Propagate every mutation failure explicitly; never report false recovery.
+  if ! record "$previous" "$hash" pending ||
+     ! rm -f -- "$ROOT/socktd.next" || ! activate "$previous"; then
+    echo 'ROLLBACK FAILED: could not activate previous executable' >&2; return 1
+  fi
+  if ! restart || ! health; then echo 'ROLLBACK FAILED: manual recovery required; transaction retained' >&2; return 1; fi
+  record "$previous" "$hash" current && rm -f "$STATE/pending"
+}
+case "$cmd" in
+status)
+  [[ ! -f $STATE/current ]] || cat "$STATE/current"
+  [[ ! -f $STATE/pending ]] || echo 'Interrupted/failed deployment: rollback required'
+  exit 0;;
+rollback)
+  if ((dry_run)); then trusted "$STATE/previous"; verify_target "$(sed -n '1p' "$STATE/previous")" "$(sed -n '2p' "$STATE/previous")"; echo 'rollback verified (dry run)'; exit 0; fi
+  restore || exit 1; echo 'rolled back executable; database unchanged'; exit 0;;
+esac
+[[ ! -e $STATE/pending ]] || die 'unresolved deployment; run rollback before proceeding'
+snapshot
+if [[ $cmd == publish ]]; then
+  trusted "$STATE/current"
+  target="$RELEASES/socktd-$version-$commit"
+  [[ $(sed -n '1p' "$STATE/current") == "$target" && $(sed -n '2p' "$STATE/current") == "$sha" ]] || die 'release is not the healthy deployed version'
+  verify_target "$target" "$sha"
+  trusted "$WEB"
+  ((dry_run)) && { echo 'publication verified (dry run)'; exit 0; }
+  # Public installers must also work when the source/GitHub Release is private.
+  [[ -d $WEB/releases ]] || install -d -m 0755 "$WEB/releases"
+  trusted "$WEB/releases"
+  public="$WEB/releases/$version"
+  if [[ -e $public ]]; then
+    trusted "$public"
+    for asset in sockt-windows-amd64.exe sockt-updater-windows-amd64.exe sockt-linux-amd64 sockt-linux-arm64 sockt-windows-amd64.zip install-sockt.ps1 install-sockt.sh "sockt-$version-checksums.txt" "sockt-$version-checksums.txt.sig"; do
+      [[ -f $public/$asset && ! -L $public/$asset ]] && cmp -s "$work/$asset" "$public/$asset" || die 'immutable public bundle differs'
+    done
+  else
+    public_stage=$(mktemp -d "$WEB/releases/.stage.XXXXXX")
+    for asset in sockt-windows-amd64.exe sockt-updater-windows-amd64.exe sockt-linux-amd64 sockt-linux-arm64 sockt-windows-amd64.zip install-sockt.ps1 install-sockt.sh "sockt-$version-checksums.txt" "sockt-$version-checksums.txt.sig"; do
+      install -m 0644 "$work/$asset" "$public_stage/$asset"
+    done
+    chmod 0755 "$public_stage"
+    mv -T "$public_stage" "$public"
+  fi
+  for asset in sockt-windows-amd64.exe sockt-linux-amd64 sockt-linux-arm64; do
+    dest="$WEB/sockt-$version-$asset"
+    if [[ -e $dest ]]; then cmp -s "$work/$asset" "$dest" || die 'immutable asset already differs'; else
+      install -m 0644 "$work/$asset" "$dest.next"; mv -T "$dest.next" "$dest"
+    fi
+  done
+  install -m 0644 "$work/stable.json" "$WEB/stable.json.next"
+  mv -Tf "$WEB/stable.json.next" "$WEB/stable.json"
+  echo "published $version"; exit 0
+fi
+target="$RELEASES/socktd-$version-$commit"
+if [[ -f $STATE/current && $(sed -n '1p' "$STATE/current") == "$target" ]]; then
+  [[ $(sed -n '2p' "$STATE/current") == "$sha" && $(readlink -f "$ROOT/socktd") == "$target" ]] || die 'current identity mismatch'
+  verify_target "$target" "$sha"
+  health || die 'existing deployment is unhealthy; rollback required'
+  echo 'already deployed; preserved original rollback target'
+  exit 0
+fi
+plan=$(cat "$work/migration-plan")
+[[ $plan == none || $plan == required ]] || die 'invalid signed migration plan'
+if [[ $plan == required ]]; then
+  ((allow_migrations)) || die 'explicit migration approval required'
+  [[ -n $backup ]] || die 'backup receipt required'
+  receipt="$BACKUPS/$backup.verified"; trusted "$receipt"
+  [[ -f $receipt && $(stat -c %h "$receipt") == 1 && $(stat -c %a "$receipt") == 600 ]] || die 'invalid receipt permissions/type'
+  [[ $(cat "$receipt") == "$(printf '%s\n%s\n%s' "$version" "$commit" "$sha")" ]] || die 'receipt is not bound to this release'
+  age=$(( $(date +%s) - $(stat -c %Y "$receipt") )); ((age>=0 && age<=86400)) || die 'expired receipt'
+  trusted "$MIGRATION_ENV"
+  [[ $(stat -c %a "$MIGRATION_ENV") == 600 ]] || die 'migration environment must be root-only'
+fi
+# First deployment: preserve the regular legacy executable before replacing it.
+if [[ -L $ROOT/socktd ]]; then
+  previous=$(readlink -f "$ROOT/socktd"); trusted "$previous"
+  previous_sha=$(sha256sum "$previous" | cut -d' ' -f1)
+else
+  trusted "$ROOT/socktd"
+  previous_sha=$(sha256sum "$ROOT/socktd" | cut -d' ' -f1)
+  previous="$RELEASES/socktd-legacy-$previous_sha"
+fi
+[[ -x $ROOT/socktd ]] || die 'existing executable unavailable'
+((dry_run)) && { echo 'deployment verified (dry run); no migration or executable run'; exit 0; }
+if [[ ! -L $ROOT/socktd ]]; then
+  [[ -e $previous ]] || install -m 0755 "$ROOT/socktd" "$previous"
+fi
+verify_target "$previous" "$previous_sha"
+target="$RELEASES/socktd-$version-$commit"
+if [[ -e $target ]]; then verify_target "$target" "$sha"; else install -m 0755 "$work/socktd-linux-amd64" "$target"; fi
+# Never execute release code as root, even when signed.
+/usr/bin/timeout 10 /usr/sbin/runuser -u paulos -- "$target" version | grep -Fx "socktd $version ($commit)" >/dev/null || die 'server identity mismatch'
+record "$previous" "$previous_sha" previous
+record "$target" "$sha" pending
+# Persist recovery journal before any schema or executable changes.
+sync -f "$RELEASES"
+if [[ $plan == required ]]; then
+  # systemd (root) reads the 0600 EnvironmentFile before dropping to the dedicated
+  # migration user. The credential never enters argv, shell expansion or CI logs.
+  if ! systemd-run --quiet --wait --collect --pipe --unit="sockt-migrate-$$" \
+      -p User=socktmigrate -p Group=socktmigrate -p "EnvironmentFile=$MIGRATION_ENV" \
+      -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=yes -p PrivateTmp=yes \
+      -p UMask=0077 -p RuntimeMaxSec=300 "$target" migrate >/dev/null 2>&1; then
+    die 'migration failed; old executable still active; inspect schema and rollback journal manually'
+  fi
+fi
+rm -f -- "$ROOT/socktd.next"
+activate "$target"
+if ! restart || ! health; then
+  echo 'deployment failed; restoring verified previous executable' >&2
+  restore || die 'deployment and rollback failed; manual intervention required'
+  die 'deployment failed; previous executable restored (schema unchanged by rollback)'
+fi
+record "$target" "$sha" current
+rm -f "$STATE/pending"
+echo "deployed $version ($commit)"

@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/term"
 
+	"sockt/internal/buildinfo"
 	"sockt/internal/client"
 	"sockt/internal/config"
 	"sockt/internal/protocol"
@@ -168,7 +169,13 @@ func main() {
 			usage()
 			return
 		case "version":
-			fmt.Println("sockt v" + updater.CurrentVersion)
+			fmt.Printf("sockt %s (%s)\n", buildinfo.Version, buildinfo.Commit)
+			return
+		case "doctor":
+			if err := doctor(); err != nil {
+				fmt.Fprintln(os.Stderr, "Sockt doctor:", err)
+				os.Exit(1)
+			}
 			return
 		}
 	}
@@ -184,6 +191,12 @@ func main() {
 	}
 	if len(args) > 0 {
 		switch args[0] {
+		case "update":
+			if err = updateNow(store); err != nil {
+				fmt.Fprintln(os.Stderr, "Sockt update:", err)
+				os.Exit(1)
+			}
+			return
 		case "setup", "login", "recover":
 			err = onboard(store, args[0] == "login", args[0] == "recover")
 			if err != nil {
