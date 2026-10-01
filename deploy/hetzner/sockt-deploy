@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Root-owned, narrowly scoped deployment wrapper. Install as /usr/local/sbin/sockt-deploy.
+set -euo pipefail
+ROOT=/opt/sockt
+RELEASES="$ROOT/releases"
+INCOMING=/var/lib/sockt-deploy/incoming
+STATE=/var/lib/sockt-deploy/state
+WEB=/var/www/sockt-updates
+PUBKEY=/etc/sockt/release-public-key.pem
+LOCK=/run/lock/sockt-deploy.lock
+die() { echo "sockt-deploy: $*" >&2; exit 1; }
+usage() { die "usage: deploy|publish|rollback|status [--version vX.Y.Z] [--commit HEX] [--sha256 HEX] [--dry-run]"; }
+[[ ${EUID:-1} -eq 0 ]] || die "must run as root"
+command -v flock >/dev/null && command -v sha256sum >/dev/null && command -v curl >/dev/null || die "required commands missing"
+cmd=${1:-}; shift || true
+version= commit= sha= backup= dry_run=0 allow_migrations=0
+while (($#)); do
+  case "$1" in
+    --version) version=${2:-}; shift 2;; --commit) commit=${2:-}; shift 2;; --sha256) sha=${2:-}; shift 2;;
+    --backup-id) backup=${2:-}; shift 2;; --allow-migrations) allow_migrations=1; shift;; --dry-run) dry_run=1; shift;;
+    *) usage;; esac
+done
+run() { if ((dry_run)); then printf '+ '; printf '%q ' "$@"; printf '\n'; else "$@"; fi; }
+valid_release() { [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && $commit =~ ^[0-9a-f]{7,64}$ && $sha =~ ^[0-9a-f]{64}$ ]]; }
+release_dir() { printf '%s/%s' "$INCOMING" "$version"; }
+verify_bundle() {
+  local dir; dir=$(release_dir)
+  [[ -d $dir && $dir == "$INCOMING"/* ]] || die "invalid incoming release directory"
+  [[ -f "$dir/socktd-linux-amd64" ]] || die "server artifact missing"
+  [[ $(sha256sum "$dir/socktd-linux-amd64" | awk '{print $1}') == "$sha" ]] || die "server checksum mismatch"
+}
+health() {
+  local i
+  for i in {1..20}; do curl --fail --silent --show-error --max-time 3 http://127.0.0.1:8080/healthz | grep -qx ok && return 0; sleep 2; done
+  die "health check failed; inspect pm2 logs socktd --lines 100"
+}
+deploy() {
+  valid_release || usage; verify_bundle
+  local dir target previous plan
+  dir=$(release_dir); target="$RELEASES/socktd-${version}-${commit}"
+  [[ ! -e $target ]] || die "release already exists: $target"
+  run install -d -m 0755 "$RELEASES" "$STATE"
+  run install -m 0755 "$dir/socktd-linux-amd64" "$target"
+  "$target" version | grep -Fx "socktd $version ($commit)" >/dev/null || die "server build identity mismatch"
+  plan=$(cat "$dir/migration-plan" 2>/dev/null || echo required)
+  [[ $plan == none || $plan == required ]] || die "invalid migration plan"
+  if [[ $plan == required ]]; then
+    ((allow_migrations)) || die "release has migrations; rerun only with --allow-migrations and a verified backup receipt"
+    [[ $backup =~ ^[A-Za-z0-9._-]+$ && -f "/var/lib/sockt/backups/$backup.verified" ]] || die "verified backup receipt missing"
+    run /usr/sbin/runuser -u paulos -- /bin/bash -c 'set -a; . /etc/sockt/socktd.env; exec "$1" migrate' -- "$target"
+  fi
+  previous=$(readlink -f "$ROOT/socktd" 2>/dev/null || true)
+  [[ -n $previous && -x $previous ]] || die "current server executable unavailable"
+  run ln -s "$target" "$ROOT/socktd.next"
+  run mv -Tf "$ROOT/socktd.next" "$ROOT/socktd"
+  run /usr/sbin/runuser -u paulos -- pm2 restart socktd --update-env
+  ((dry_run)) || health
+  if (( ! dry_run )); then
+    printf '%s\n%s\n%s\n' "$previous" "$version" "$commit" > "$STATE/previous"
+    printf 'version=%s\ncommit=%s\nserver_sha256=%s\n' "$version" "$commit" "$sha" > "$STATE/current"
+  fi
+  echo "deployed $version ($commit)"
+}
+publish() {
+  valid_release || usage
+  local dir; dir=$(release_dir); [[ -f "$dir/sockt-$version-checksums.txt" && -f "$dir/sockt-$version-checksums.txt.sig" && -r $PUBKEY ]] || die "signed release bundle or public key missing"
+  (cd "$dir" && openssl pkeyutl -verify -pubin -inkey "$PUBKEY" -rawin -in "sockt-$version-checksums.txt" -sigfile "sockt-$version-checksums.txt.sig" >/dev/null && sha256sum -c "sockt-$version-checksums.txt") || die "release verification failed"
+  [[ -f "$dir/stable.json" ]] || die "stable manifest missing"
+  run install -d -m 0755 "$WEB"
+  local asset dest
+  for asset in sockt-windows-amd64.exe sockt-linux-amd64 sockt-linux-arm64; do
+    dest="$WEB/sockt-v$version-$asset"; run install -m 0644 "$dir/$asset" "$dest"
+    ((dry_run)) || curl --fail --silent --show-error --max-time 15 "https://chat.dpaulos.pt/updates/$(basename "$dest")" -o /dev/null
+  done
+  run install -m 0644 "$dir/stable.json" "$WEB/stable.json.next"
+  run mv -Tf "$WEB/stable.json.next" "$WEB/stable.json"
+  echo "published client artifacts and stable manifest for $version"
+}
+rollback() {
+  [[ -f "$STATE/previous" ]] || die "no previous deployment recorded"
+  local previous; previous=$(head -n1 "$STATE/previous")
+  [[ -x $previous && $previous == "$RELEASES"/* ]] || die "recorded rollback target is invalid"
+  run ln -s "$previous" "$ROOT/socktd.next"; run mv -Tf "$ROOT/socktd.next" "$ROOT/socktd"; run /usr/sbin/runuser -u paulos -- pm2 restart socktd --update-env
+  ((dry_run)) || health; echo "rolled back server executable to $previous"
+}
+status() { [[ -f "$STATE/current" ]] && cat "$STATE/current" || echo "no deployment metadata"; /usr/sbin/runuser -u paulos -- pm2 status socktd; }
+exec 9>"$LOCK"; flock -n 9 || die "another deployment is in progress"
+case "$cmd" in deploy) deploy;; publish) publish;; rollback) rollback;; status) status;; *) usage;; esac

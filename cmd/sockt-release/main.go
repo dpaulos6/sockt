@@ -49,6 +49,8 @@ func main() {
 		}
 		fmt.Println("Release PUBLIC key (safe to distribute):", hex.EncodeToString(pub))
 		fmt.Println("Protect the private key; never place it in the repository or on the public VPS.")
+	case "sign-checksums":
+		signChecksums(os.Args[2:])
 	case "sign":
 		flags := flag.NewFlagSet("sign", flag.ExitOnError)
 		key := flags.String("key", "", "private signing key file")
@@ -115,4 +117,45 @@ func main() {
 	default:
 		fail(fmt.Errorf("unknown command %q", os.Args[1]))
 	}
+}
+
+func signChecksums(args []string) {
+	flags := flag.NewFlagSet("sign-checksums", flag.ExitOnError)
+	key := flags.String("key", "", "private signing key file")
+	dist := flags.String("dist", "dist", "directory containing release binaries")
+	version := flags.String("version", "", "release version")
+	out := flags.String("out", "dist/checksums.txt", "checksum output")
+	_ = flags.Parse(args)
+	if *key == "" || *version == "" {
+		fail(fmt.Errorf("-key and -version are required"))
+	}
+	if _, err := updater.VersionParts(*version); err != nil {
+		fail(err)
+	}
+	seedText, err := os.ReadFile(*key)
+	if err != nil {
+		fail(err)
+	}
+	seed, err := hex.DecodeString(strings.TrimSpace(string(seedText)))
+	if err != nil || len(seed) != ed25519.SeedSize {
+		fail(fmt.Errorf("invalid signing key"))
+	}
+	files := []string{"sockt-windows-amd64.exe", "sockt-updater-windows-amd64.exe", "sockt-linux-amd64", "sockt-linux-arm64", "socktd-linux-amd64", "socktd-linux-arm64", "stable.json"}
+	var lines []string
+	for _, name := range files {
+		data, readErr := os.ReadFile(filepath.Join(*dist, name))
+		if readErr != nil {
+			fail(readErr)
+		}
+		sum := sha256.Sum256(data)
+		lines = append(lines, hex.EncodeToString(sum[:])+"  "+name)
+	}
+	payload := []byte(strings.Join(lines, "\n") + "\n")
+	if err = os.WriteFile(*out, payload, 0644); err != nil {
+		fail(err)
+	}
+	if err = os.WriteFile(*out+".sig", []byte(hex.EncodeToString(ed25519.Sign(ed25519.NewKeyFromSeed(seed), payload))+"\n"), 0644); err != nil {
+		fail(err)
+	}
+	fmt.Println("Signed release checksums:", *out)
 }

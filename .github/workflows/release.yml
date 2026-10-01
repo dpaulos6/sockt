@@ -1,0 +1,85 @@
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      version: { description: Existing annotated vX.Y.Z tag, required: true, type: string }
+      apply_migrations: { description: Apply reviewed migrations after a verified backup, required: true, default: false, type: boolean }
+      backup_id: { description: Verified Hetzner backup receipt ID when migrations are approved, required: false, type: string }
+concurrency: { group: production-release, cancel-in-progress: false }
+permissions: { contents: read }
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17
+        env: { POSTGRES_DB: sockt_test, POSTGRES_USER: sockt_test, POSTGRES_PASSWORD: ci-only-password }
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U sockt_test -d sockt_test" --health-interval 5s --health-timeout 3s --health-retries 15
+    outputs: { version: ${{ steps.release.outputs.version }}, commit: ${{ steps.release.outputs.commit }} }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: { ref: ${{ inputs.version }}, fetch-depth: 0 }
+      - id: release
+        run: |
+          test "${{ inputs.version }}" = "$(git describe --exact-match --tags)"
+          git cat-file -e "${{ inputs.version }}^{tag}"
+          git fetch origin master --depth=1
+          git merge-base --is-ancestor "${{ inputs.version }}^{commit}" origin/master
+          echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short=12 "${{ inputs.version }}^{commit}")" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@0a12ed9d6d7d0734a0e2e9026830467bd4f5c3f7
+        with: { go-version-file: go.mod, cache: true }
+      - run: gofmt -d . | (! grep .)
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+        env: { SOCKT_TEST_DATABASE_URL: postgres://sockt_test:ci-only-password@127.0.0.1:5432/sockt_test?sslmode=disable }
+      - run: SOCKT_RELEASE_VERSION=${{ steps.release.outputs.version }} SOCKT_RELEASE_COMMIT=${{ steps.release.outputs.commit }} SOCKT_REQUIRE_TAG=1 ./scripts/build.sh
+      - run: |
+          test -f dist/sockt-windows-amd64.exe && test -f dist/sockt-updater-windows-amd64.exe
+          zip -j dist/sockt-windows-amd64.zip dist/sockt-windows-amd64.exe dist/sockt-updater-windows-amd64.exe
+          unzip -l dist/sockt-windows-amd64.zip | grep -F sockt-updater-windows-amd64.exe
+          previous=$(git tag --merged "${{ inputs.version }}^" --sort=-version:refname | head -n1 || true)
+          if test -z "$previous" || ! git diff --quiet "$previous" "${{ inputs.version }}" -- internal/database/migrations; then echo required > dist/migration-plan; else echo none > dist/migration-plan; fi
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with: { name: release, path: dist/, if-no-files-found: error }
+  production:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: production-release
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with: { ref: ${{ inputs.version }} }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with: { name: release, path: dist }
+      - uses: actions/setup-go@0a12ed9d6d7d0734a0e2e9026830467bd4f5c3f7
+        with: { go-version-file: go.mod, cache: true }
+      - name: Sign only after protected-environment approval
+        env: { SOCKT_SIGNING_KEY: ${{ secrets.SOCKT_SIGNING_KEY }}, SOCKT_PUBLIC_KEY: ${{ vars.SOCKT_UPDATE_PUBLIC_KEY }} }
+        run: |
+          test -n "$SOCKT_SIGNING_KEY" && test -n "$SOCKT_PUBLIC_KEY"
+          umask 077; printf '%s' "$SOCKT_SIGNING_KEY" > "$RUNNER_TEMP/key"
+          go run ./cmd/sockt-release sign -key "$RUNNER_TEMP/key" -version "${{ needs.build.outputs.version }}" -base-url https://chat.dpaulos.pt/updates -dist dist -out dist/stable.json
+          go run ./cmd/sockt-release sign-checksums -key "$RUNNER_TEMP/key" -version "${{ needs.build.outputs.version }}" -dist dist -out "dist/sockt-${{ needs.build.outputs.version }}-checksums.txt"
+          sed -e "s/__SOCKT_VERSION__/${{ needs.build.outputs.version }}/g" -e "s/__SOCKT_PUBLIC_KEY__/$SOCKT_PUBLIC_KEY/g" scripts/install.ps1 > dist/install-sockt.ps1
+          sed -e "s/__SOCKT_VERSION__/${{ needs.build.outputs.version }}/g" -e "s/__SOCKT_PUBLIC_KEY__/$SOCKT_PUBLIC_KEY/g" scripts/install.sh > dist/install-sockt.sh
+          rm -f "$RUNNER_TEMP/key"
+      - name: Transfer immutable approved artifacts
+        env: { DEPLOY_KEY: ${{ secrets.HETZNER_DEPLOY_SSH_KEY }}, KNOWN_HOSTS: ${{ secrets.HETZNER_SSH_KNOWN_HOSTS }}, HOST: ${{ vars.HETZNER_DEPLOY_HOST }}, USER: ${{ vars.HETZNER_DEPLOY_USER }} }
+        run: |
+          test -n "$DEPLOY_KEY" && test -n "$KNOWN_HOSTS" && test -n "$HOST" && test -n "$USER"
+          install -d -m 700 ~/.ssh; printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519; chmod 600 ~/.ssh/id_ed25519; printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          remote="/var/lib/sockt-deploy/incoming/${{ needs.build.outputs.version }}"
+          ssh -o StrictHostKeyChecking=yes "$USER@$HOST" "install -d -m 0750 '$remote'"
+          scp -o StrictHostKeyChecking=yes dist/* "$USER@$HOST:$remote/"
+          sha=$(sha256sum dist/socktd-linux-amd64 | awk '{print $1}')
+          migration=''; if [[ '${{ inputs.apply_migrations }}' == true ]]; then migration="--allow-migrations --backup-id '${{ inputs.backup_id }}'"; fi
+          ssh -o StrictHostKeyChecking=yes "$USER@$HOST" "sudo /usr/local/sbin/sockt-deploy deploy --version '${{ needs.build.outputs.version }}' --commit '${{ needs.build.outputs.commit }}' --sha256 '$sha' $migration"
+      - name: Publish immutable GitHub Release after server health succeeds
+        run: gh release create "${{ needs.build.outputs.version }}" dist/* --title "Sockt ${{ needs.build.outputs.version }}" --generate-notes
+        env: { GH_TOKEN: ${{ github.token }} }
+      - name: Publish client files, then stable manifest last
+        env: { HOST: ${{ vars.HETZNER_DEPLOY_HOST }}, USER: ${{ vars.HETZNER_DEPLOY_USER }} }
+        run: ssh -o StrictHostKeyChecking=yes "$USER@$HOST" "sudo /usr/local/sbin/sockt-deploy publish --version '${{ needs.build.outputs.version }}' --commit '${{ needs.build.outputs.commit }}' --sha256 '$(sha256sum dist/socktd-linux-amd64 | awk '{print $1}')'"
