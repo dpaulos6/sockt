@@ -4,7 +4,17 @@ New-Item -ItemType Directory -Force dist | Out-Null
 $releaseKey = $env:SOCKT_UPDATE_PUBLIC_KEY
 $releaseVersion = if ($env:SOCKT_RELEASE_VERSION) { $env:SOCKT_RELEASE_VERSION } else { "dev" }
 $releaseCommit = if ($env:SOCKT_RELEASE_COMMIT) { $env:SOCKT_RELEASE_COMMIT } else { (git rev-parse --short=12 HEAD) }
-if ($env:SOCKT_REQUIRE_TAG -eq "1") { if ($releaseVersion -notmatch "^v?\d+\.\d+\.\d+$" -or (git describe --exact-match --tags) -ne $releaseVersion) { throw "release version must match the current annotated tag" } }
+if ($releaseCommit -cnotmatch '^(?:[0-9a-f]{7,40}|unknown)$') { throw 'Invalid commit' }
+if ($releaseVersion -ne 'dev') {
+    if ($releaseVersion -cnotmatch '^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw 'Invalid release version' }
+    $releaseVersion = 'v' + ($releaseVersion -replace '^v','')
+    if ($releaseKey -cnotmatch '^[0-9a-fA-F]{64}$' -or $releaseKey -match '^0+$') { throw 'Valid existing Ed25519 public key required' }
+} elseif ($releaseKey -and ($releaseKey -cnotmatch '^[0-9a-fA-F]{64}$' -or $releaseKey -match '^0+$')) { throw 'Invalid public key' }
+if ($env:SOCKT_REQUIRE_TAG -eq '1') {
+    if ($releaseVersion -eq 'dev' -or (git describe --exact-match --tags) -ne $releaseVersion) { throw 'Release tag mismatch' }
+    git cat-file -e "$releaseVersion`^{tag}"
+    if ($LASTEXITCODE -ne 0 -or (git rev-parse HEAD) -ne $releaseCommit) { throw 'Annotated tag and full commit required' }
+}
 $ldflags = "-s -w -X sockt/internal/updater.PublicKeyHex=$releaseKey -X sockt/internal/buildinfo.Version=$releaseVersion -X sockt/internal/buildinfo.Commit=$releaseCommit"
 $env:CGO_ENABLED = "0"
 try {

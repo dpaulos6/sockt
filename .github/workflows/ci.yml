@@ -1,8 +1,9 @@
 name: CI
 on:
   push:
-    branches: [master]
+    branches: [master, feat/release-automation]
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -36,11 +37,15 @@ jobs:
       - run: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o /tmp/sockt-amd64 ./cmd/sockt && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o /tmp/socktd-amd64 ./cmd/socktd
       - run: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o /tmp/sockt-arm64 ./cmd/sockt && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o /tmp/socktd-arm64 ./cmd/socktd
 
+      - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -shellcheck= -pyflakes=
       - run: python3 scripts/test_release.py
       - run: |
           go build -o /tmp/sockt-test-signer ./cmd/sockt-release
           sudo bash deploy/hetzner/test-sockt-deploy.sh /tmp/sockt-test-signer
-      - run: bash -n scripts/build.sh scripts/install.sh scripts/validate-release.sh deploy/hetzner/sockt-deploy
+      - run: |
+          for script in scripts/*.sh deploy/hetzner/sockt-deploy deploy/hetzner/test-sockt-deploy.sh; do
+            bash -n "$script"
+          done
   windows-installer:
     runs-on: windows-2022
     steps:
