@@ -5,6 +5,13 @@
 !/data/.gitkeep
 /dist/
 *.exe
+*.previous
 *.test
 *.out
 /.vscode/
+
+/.idea/
+*.zip
+release-notes.md
+__pycache__/
+*.py[cod]
