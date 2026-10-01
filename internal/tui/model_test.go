@@ -47,7 +47,7 @@ func TestAccountShortcutRequestsMenu(t *testing.T) {
 		Code: 'p',
 		Mod:  tea.ModCtrl,
 	})
-	if !next.(Model).AccountRequested() {
+	if next.(Model).page != accountPage {
 		t.Fatal("Ctrl+P didn't open account management")
 	}
 }

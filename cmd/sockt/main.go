@@ -259,47 +259,30 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Cannot reuse a session with a different server; run sockt setup")
 		os.Exit(2)
 	}
-	for {
-		c := store.Value
-		if c.Token == "" {
-			return
-		}
-		session := client.New(*addr, c.Username, c.Token, c.LastSeen, store.UpdateSeen)
-		program, closeTerminal, terminalErr := newTerminalProgram(tui.New(c.Username, session, *style, *quiet, *addr))
-		if terminalErr != nil {
-			session.Close()
-			fmt.Fprintln(os.Stderr, "Sockt UI:", terminalErr)
-			os.Exit(1)
-		}
-		final, runErr := program.Run()
-		closeTerminal()
+	c := store.Snapshot()
+	session := client.New(*addr, c.Username, c.Token, c.LastSeen, store.UpdateSeen)
+	program, closeTerminal, terminalErr := newTerminalProgram(tui.New(c.Username, session, *style, *quiet, *addr).WithAccount(store))
+	if terminalErr != nil {
 		session.Close()
-		if runErr != nil {
-			fmt.Fprintln(os.Stderr, "Sockt UI:", runErr)
+		fmt.Fprintln(os.Stderr, "Sockt UI:", terminalErr)
+		os.Exit(1)
+	}
+	final, runErr := program.Run()
+	closeTerminal()
+	session.Close()
+	model, ok := final.(tui.Model)
+	if ok {
+		model.Close()
+	}
+	if runErr != nil {
+		fmt.Fprintln(os.Stderr, "Sockt UI:", runErr)
+		os.Exit(1)
+	}
+	if ok && model.UpgradePath() != "" {
+		fmt.Println("Installing verified Sockt update and restarting...")
+		if err = updater.InstallAndRestart(model.UpgradePath()); err != nil {
+			fmt.Fprintln(os.Stderr, "Sockt update:", err)
 			os.Exit(1)
-		}
-		model, ok := final.(tui.Model)
-		if !ok {
-			return
-		}
-		if model.UpgradePath() != "" {
-			fmt.Println("Installing verified Sockt update and restarting...")
-			if err = updater.InstallAndRestart(model.UpgradePath()); err != nil {
-				fmt.Fprintln(os.Stderr, "Sockt update:", err)
-				os.Exit(1)
-			}
-			return
-		}
-		if !model.AccountRequested() {
-			return
-		}
-		again, accountErr := runAccountMenu(store)
-		if accountErr != nil {
-			fmt.Fprintln(os.Stderr, "Account:", accountErr)
-			return
-		}
-		if !again {
-			return
 		}
 	}
 }

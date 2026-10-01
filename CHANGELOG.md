@@ -1,3 +1,13 @@
+## Unreleased — Persistent Account view
+
+- Keep one Bubble Tea application and chat connection across Chat/Account navigation.
+- Add asynchronous device listing, confirmed revocation/logout, hidden password
+  entry, and recovery-code replacement with explicit acknowledgment.
+- Preserve drafts and history while Account receives background connection and
+  update events; reconnect only when a password change replaces the session.
+- Serialize token persistence with history saves and reject stale transport events.
+- Keep standalone CLI account commands and the signed-update protocol unchanged.
+
 ## v0.9.2 — Windows updater restart reliability
 
 - Restart the client in its existing PowerShell or Windows Terminal console after an update.

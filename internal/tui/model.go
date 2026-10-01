@@ -43,7 +43,9 @@ type Model struct {
 	style                 string
 	quiet                 bool
 	help                  bool
-	accountRequested      bool
+	page                  page
+	account               accountModel
+	accountService        AccountService
 	slashSelection        int
 	slashDismissed        bool
 	manualUpdateCheck     bool
@@ -65,14 +67,19 @@ func New(username string, conn *client.Client, style string, quiet bool, serverU
 }
 
 type closedMsg struct{}
+type networkMsg struct {
+	events <-chan client.Event
+	event  client.Event
+	closed bool
+}
 
 func waitForNetwork(events <-chan client.Event) tea.Cmd {
 	return func() tea.Msg {
 		e, ok := <-events
 		if !ok {
-			return closedMsg{}
+			return networkMsg{events: events, closed: true}
 		}
-		return e
+		return networkMsg{events: events, event: e}
 	}
 }
 
@@ -112,8 +119,7 @@ func downloadUpdate(offer updater.Offer) tea.Cmd {
 
 // UpgradePath is nonempty only after a verified update was staged and the TUI
 // voluntarily exited. The CLI installs and restarts outside alternate screen.
-func (m Model) UpgradePath() string    { return m.updateStagedPath }
-func (m Model) AccountRequested() bool { return m.accountRequested }
+func (m Model) UpgradePath() string { return m.updateStagedPath }
 
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{waitForNetwork(m.events)}
@@ -143,6 +149,16 @@ func (m *Model) addMessage(msg protocol.Message) {
 }
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case networkMsg:
+		if msg.events != m.events {
+			return m, nil
+		}
+		if msg.closed {
+			return m.Update(closedMsg{})
+		}
+		return m.Update(msg.event)
+	case accountResult:
+		return m.accountComplete(msg)
 	case updateTickMsg:
 		if m.updateStage == "" {
 			return m, tea.Batch(checkForUpdate(m.updateServer), updateTick())
@@ -184,7 +200,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.online = false
 		m.composer.Blur()
 		if m.status == "Connected" {
-			m.status = "Disconnected · run sockt setup if your invite changed"
+			m.status = "Session ended · run sockt login to sign in again"
 		}
 		return m, nil
 	case client.Event:
@@ -195,7 +211,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Status != "" {
 			m.online = msg.Online
 			m.status = msg.Status
-			if msg.Online {
+			if msg.Online && m.page == chatPage {
 				m.composer.Focus()
 			} else {
 				m.composer.Blur()
@@ -221,6 +237,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, waitForNetwork(m.events)
 	case tea.KeyPressMsg:
+		if m.page == accountPage {
+			return m.accountKey(msg)
+		}
 		if m.updateStage == "confirm" {
 			switch strings.ToLower(msg.String()) {
 			case "y", "enter":
@@ -268,8 +287,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		case "ctrl+p":
-			m.accountRequested = true
-			return m, tea.Quit
+			return m.openAccount()
 		case "f1":
 			m.help = !m.help
 			return m, nil
@@ -297,8 +315,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "/exit":
 				return m, tea.Quit
 			case "/account":
-				m.accountRequested = true
-				return m, tea.Quit
+				m.composer.SetValue("")
+				return m.openAccount()
 			case "/help":
 				m.help = true
 				m.composer.SetValue("")
@@ -344,7 +362,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	var cmd tea.Cmd
-	if m.online {
+	if m.online && m.page == chatPage {
 		before := m.composer.Value()
 		m.composer, cmd = m.composer.Update(msg)
 		if m.composer.Value() != before {
@@ -457,6 +475,9 @@ func (m Model) chatRows(width int) []string {
 	return rows
 }
 func (m Model) View() tea.View {
+	if m.page == accountPage {
+		return m.accountView()
+	}
 	width := max(20, m.width)
 	height := max(8, m.height)
 	separator := lineStyle.Render(strings.Repeat("─", width))
