@@ -17,69 +17,112 @@ jobs:
         ports: ['5432:5432']
         options: >-
           --health-cmd "pg_isready -U sockt_test -d sockt_test" --health-interval 5s --health-timeout 3s --health-retries 15
+    env:
+      RELEASE_TAG: ${{ inputs.version }}
+      APPLY_MIGRATIONS: ${{ inputs.apply_migrations }}
+      BACKUP_ID: ${{ inputs.backup_id }}
+      SOCKT_UPDATE_PUBLIC_KEY: ${{ vars.SOCKT_UPDATE_PUBLIC_KEY }}
     outputs: { version: ${{ steps.release.outputs.version }}, commit: ${{ steps.release.outputs.commit }} }
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with: { ref: ${{ inputs.version }}, fetch-depth: 0 }
+        with: { ref: master, fetch-depth: 0, persist-credentials: false }
       - id: release
         run: |
-          test "${{ inputs.version }}" = "$(git describe --exact-match --tags)"
-          git cat-file -e "${{ inputs.version }}^{tag}"
-          git fetch origin master --depth=1
-          git merge-base --is-ancestor "${{ inputs.version }}^{commit}" origin/master
-          echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-          echo "commit=$(git rev-parse --short=12 "${{ inputs.version }}^{commit}")" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@0a12ed9d6d7d0734a0e2e9026830467bd4f5c3f7
+          source scripts/validate-release.sh
+          validate_release; validate_key
+          test "$GITHUB_REF" = refs/heads/master
+          git cat-file -e "$RELEASE_TAG^{tag}"
+          git merge-base --is-ancestor "$RELEASE_TAG^{commit}" origin/master
+          commit=$(git rev-parse "$RELEASE_TAG^{commit}")
+          git checkout --detach "$commit"
+          printf 'version=%s\ncommit=%s\n' "$RELEASE_TAG" "$commit" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with: { go-version-file: go.mod, cache: true }
       - run: gofmt -d . | (! grep .)
       - run: go vet ./...
       - run: go test -race -count=1 ./...
         env: { SOCKT_TEST_DATABASE_URL: postgres://sockt_test:ci-only-password@127.0.0.1:5432/sockt_test?sslmode=disable }
-      - run: SOCKT_RELEASE_VERSION=${{ steps.release.outputs.version }} SOCKT_RELEASE_COMMIT=${{ steps.release.outputs.commit }} SOCKT_REQUIRE_TAG=1 ./scripts/build.sh
+      - run: bash scripts/build.sh
+        env:
+          SOCKT_RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          SOCKT_RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
+          SOCKT_REQUIRE_TAG: '1' 
       - run: |
           test -f dist/sockt-windows-amd64.exe && test -f dist/sockt-updater-windows-amd64.exe
           zip -j dist/sockt-windows-amd64.zip dist/sockt-windows-amd64.exe dist/sockt-updater-windows-amd64.exe
           unzip -l dist/sockt-windows-amd64.zip | grep -F sockt-updater-windows-amd64.exe
-          previous=$(git tag --merged "${{ inputs.version }}^" --sort=-version:refname | head -n1 || true)
-          if test -z "$previous" || ! git diff --quiet "$previous" "${{ inputs.version }}" -- internal/database/migrations; then echo required > dist/migration-plan; else echo none > dist/migration-plan; fi
+          # Require the documented baseline; never guess an initial migration plan.
+          git rev-parse --verify 'refs/tags/v0.9.2^{tag}' >/dev/null
+          previous=$(git tag --merged "$RELEASE_TAG^" --sort=-version:refname | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | head -n1)
+          test -n "$previous"
+          if git diff --quiet "$previous" "$RELEASE_TAG" -- internal/database/migrations; then echo none > dist/migration-plan; else echo required > dist/migration-plan; fi
+          printf '%s\n%s\n%s\n' "$RELEASE_TAG" "$(git rev-parse HEAD)" "$SOCKT_UPDATE_PUBLIC_KEY" > dist/release-meta
       - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with: { name: release, path: dist/, if-no-files-found: error }
   production:
     needs: build
     runs-on: ubuntu-24.04
     environment: production-release
+    env:
+      RELEASE_TAG: ${{ needs.build.outputs.version }}
+      RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
+      APPLY_MIGRATIONS: ${{ inputs.apply_migrations }}
+      BACKUP_ID: ${{ inputs.backup_id }}
+      SOCKT_UPDATE_PUBLIC_KEY: ${{ vars.SOCKT_UPDATE_PUBLIC_KEY }}
+      DEPLOY_HOST: ${{ vars.HETZNER_DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.HETZNER_DEPLOY_USER }}
     permissions: { contents: write }
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with: { ref: ${{ inputs.version }} }
+        with: { ref: master, persist-credentials: false }
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with: { name: release, path: dist }
-      - uses: actions/setup-go@0a12ed9d6d7d0734a0e2e9026830467bd4f5c3f7
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with: { go-version-file: go.mod, cache: true }
       - name: Sign only after protected-environment approval
-        env: { SOCKT_SIGNING_KEY: ${{ secrets.SOCKT_SIGNING_KEY }}, SOCKT_PUBLIC_KEY: ${{ vars.SOCKT_UPDATE_PUBLIC_KEY }} }
+        env: { SOCKT_SIGNING_KEY: ${{ secrets.SOCKT_SIGNING_KEY }} }
         run: |
-          test -n "$SOCKT_SIGNING_KEY" && test -n "$SOCKT_PUBLIC_KEY"
-          umask 077; printf '%s' "$SOCKT_SIGNING_KEY" > "$RUNNER_TEMP/key"
-          go run ./cmd/sockt-release sign -key "$RUNNER_TEMP/key" -version "${{ needs.build.outputs.version }}" -base-url https://chat.dpaulos.pt/updates -dist dist -out dist/stable.json
-          go run ./cmd/sockt-release sign-checksums -key "$RUNNER_TEMP/key" -version "${{ needs.build.outputs.version }}" -dist dist -out "dist/sockt-${{ needs.build.outputs.version }}-checksums.txt"
-          sed -e "s/__SOCKT_VERSION__/${{ needs.build.outputs.version }}/g" -e "s/__SOCKT_PUBLIC_KEY__/$SOCKT_PUBLIC_KEY/g" scripts/install.ps1 > dist/install-sockt.ps1
-          sed -e "s/__SOCKT_VERSION__/${{ needs.build.outputs.version }}/g" -e "s/__SOCKT_PUBLIC_KEY__/$SOCKT_PUBLIC_KEY/g" scripts/install.sh > dist/install-sockt.sh
-          rm -f "$RUNNER_TEMP/key"
+          source scripts/validate-release.sh
+          validate_release; validate_key; validate_remote
+          [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$(sed -n '1p' dist/release-meta)" = "$RELEASE_TAG"
+          test "$(sed -n '2p' dist/release-meta)" = "$RELEASE_COMMIT"
+          test "$(sed -n '3p' dist/release-meta)" = "$SOCKT_UPDATE_PUBLIC_KEY"
+          umask 077
+          key=$(mktemp "$RUNNER_TEMP/sockt-key.XXXXXX")
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "$SOCKT_SIGNING_KEY" > "$key"
+          unset SOCKT_SIGNING_KEY
+          go run ./cmd/sockt-release check-key -key "$key" -public-key "$SOCKT_UPDATE_PUBLIC_KEY"
+          go run ./cmd/sockt-release sign -key "$key" -version "$RELEASE_TAG" -base-url https://chat.dpaulos.pt/updates -dist dist -out dist/stable.json
+          sed -e "s/__SOCKT_VERSION__/$RELEASE_TAG/g" -e "s/__SOCKT_PUBLIC_KEY__/$SOCKT_UPDATE_PUBLIC_KEY/g" scripts/install.ps1 > dist/install-sockt.ps1
+          sed -e "s/__SOCKT_VERSION__/$RELEASE_TAG/g" -e "s/__SOCKT_PUBLIC_KEY__/$SOCKT_UPDATE_PUBLIC_KEY/g" scripts/install.sh > dist/install-sockt.sh
+          go run ./cmd/sockt-release sign-checksums -key "$key" -version "$RELEASE_TAG" -dist dist -out "dist/sockt-$RELEASE_TAG-checksums.txt"
       - name: Transfer immutable approved artifacts
-        env: { DEPLOY_KEY: ${{ secrets.HETZNER_DEPLOY_SSH_KEY }}, KNOWN_HOSTS: ${{ secrets.HETZNER_SSH_KNOWN_HOSTS }}, HOST: ${{ vars.HETZNER_DEPLOY_HOST }}, USER: ${{ vars.HETZNER_DEPLOY_USER }} }
+        env: { DEPLOY_KEY: ${{ secrets.HETZNER_DEPLOY_SSH_KEY }}, KNOWN_HOSTS: ${{ secrets.HETZNER_SSH_KNOWN_HOSTS }} }
         run: |
-          test -n "$DEPLOY_KEY" && test -n "$KNOWN_HOSTS" && test -n "$HOST" && test -n "$USER"
-          install -d -m 700 ~/.ssh; printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519; chmod 600 ~/.ssh/id_ed25519; printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
-          remote="/var/lib/sockt-deploy/incoming/${{ needs.build.outputs.version }}"
-          ssh -o StrictHostKeyChecking=yes "$USER@$HOST" "install -d -m 0750 '$remote'"
-          scp -o StrictHostKeyChecking=yes dist/* "$USER@$HOST:$remote/"
+          source scripts/validate-release.sh
+          validate_release; validate_remote
+          test -n "$DEPLOY_KEY" && test -n "$KNOWN_HOSTS"
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519; chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          remote="/var/lib/sockt-deploy/incoming/$RELEASE_TAG"
+          ssh -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST" "install -d -m 0750 '$remote'"
+          scp -o StrictHostKeyChecking=yes dist/* "$DEPLOY_USER@$DEPLOY_HOST:$remote/"
           sha=$(sha256sum dist/socktd-linux-amd64 | awk '{print $1}')
-          migration=''; if [[ '${{ inputs.apply_migrations }}' == true ]]; then migration="--allow-migrations --backup-id '${{ inputs.backup_id }}'"; fi
-          ssh -o StrictHostKeyChecking=yes "$USER@$HOST" "sudo /usr/local/sbin/sockt-deploy deploy --version '${{ needs.build.outputs.version }}' --commit '${{ needs.build.outputs.commit }}' --sha256 '$sha' $migration"
+          migration=''
+          if [[ "$APPLY_MIGRATIONS" == true ]]; then migration="--allow-migrations --backup-id '$BACKUP_ID'"; fi
+          ssh -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST" "sudo /usr/local/sbin/sockt-deploy deploy --version '$RELEASE_TAG' --commit '$RELEASE_COMMIT' --sha256 '$sha' $migration"
       - name: Publish immutable GitHub Release after server health succeeds
-        run: gh release create "${{ needs.build.outputs.version }}" dist/* --title "Sockt ${{ needs.build.outputs.version }}" --generate-notes
+        run: gh release create "$RELEASE_TAG" dist/* --verify-tag --title "Sockt $RELEASE_TAG" --generate-notes
         env: { GH_TOKEN: ${{ github.token }} }
       - name: Publish client files, then stable manifest last
-        env: { HOST: ${{ vars.HETZNER_DEPLOY_HOST }}, USER: ${{ vars.HETZNER_DEPLOY_USER }} }
-        run: ssh -o StrictHostKeyChecking=yes "$USER@$HOST" "sudo /usr/local/sbin/sockt-deploy publish --version '${{ needs.build.outputs.version }}' --commit '${{ needs.build.outputs.commit }}' --sha256 '$(sha256sum dist/socktd-linux-amd64 | awk '{print $1}')'"
+        run: |
+          source scripts/validate-release.sh
+          validate_release; validate_remote
+          sha=$(sha256sum dist/socktd-linux-amd64 | awk '{print $1}')
+          ssh -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST" "sudo /usr/local/sbin/sockt-deploy publish --version '$RELEASE_TAG' --commit '$RELEASE_COMMIT' --sha256 '$sha'"
+      - name: Remove temporary SSH credentials
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519
