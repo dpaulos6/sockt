@@ -26,7 +26,8 @@ function Convert-SocktHex([string]$Hex) {
 function Test-SocktSignature([string]$Payload,[string]$Signature,[string]$Key,[string]$Work) {
     if ($Key -cnotmatch '^[0-9a-fA-F]{64}$' -or $Key -match '^0+$') { throw 'Invalid public key' }
     if ((Get-Item -LiteralPath $Signature).Length -ne 64) { throw 'Signature must be 64 raw bytes' }
-    $openssl = (Get-Command openssl -CommandType Application -ErrorAction Stop).Source
+    $openssl = Get-Command openssl -CommandType Application -ErrorAction Stop |
+    Select-Object -First 1 -ExpandProperty Source
     $opensslVersion = & $openssl version
     if ($LASTEXITCODE -ne 0 -or $opensslVersion -notmatch '^OpenSSL 3\.') { throw 'OpenSSL 3 is required; install it from a trusted source' }
     $der = Join-Path $Work 'public.der'
