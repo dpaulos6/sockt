@@ -1,5 +1,6 @@
 # Run only on your trusted Hetzner server. The database is loopback-only.
 services:
+
   postgres:
     image: postgres:17
     restart: unless-stopped
