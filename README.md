@@ -75,6 +75,7 @@ do not replace it. Read [SECURITY.md](SECURITY.md) before reporting issues.
 
 - [Architecture](docs/architecture.md)
 - [Protocol](docs/protocol.md)
+- [Account-bound administration](docs/ADMIN.md)
 - [Release process](docs/RELEASING.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Disaster recovery](docs/DISASTER_RECOVERY.md)

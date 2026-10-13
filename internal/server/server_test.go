@@ -25,7 +25,8 @@ type fakeStore struct {
 func (s *fakeStore) Authenticate(_ context.Context, name, token string) (database.Identity, error) {
 	for i, account := range []struct{ name, token string }{{"Paulos", "a-token"}, {"Miguel", "b-token"}, {"Ana", "c-token"}} {
 		if strings.EqualFold(name, account.name) && token == account.token {
-			return database.Identity{ID: int64(i + 1), Username: account.name}, nil
+			uuid, _ := database.ParseAccountUUID([]string{adminUUID, otherUUID, thirdUUID}[i])
+			return database.Identity{ID: int64(i + 1), UUID: uuid, Username: account.name}, nil
 		}
 	}
 	return database.Identity{}, database.ErrInvalidSession

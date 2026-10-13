@@ -44,6 +44,8 @@ type Model struct {
 	quiet                 bool
 	help                  bool
 	page                  page
+	admin                 adminModel
+	adminAllowed          bool
 	account               accountModel
 	accountService        AccountService
 	slashSelection        int
@@ -197,6 +199,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.composer.SetWidth(max(10, m.width-4))
 		return m, nil
 	case closedMsg:
+		m.clearAdmin()
 		m.online = false
 		m.composer.Blur()
 		if m.status == "Connected" {
@@ -210,6 +213,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Status != "" {
 			m.online = msg.Online
+			if !msg.Online {
+				m.clearAdmin()
+			}
 			m.status = msg.Status
 			if msg.Online && m.page == chatPage {
 				m.composer.Focus()
@@ -218,6 +224,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		switch msg.Packet.Type {
+		case "ready":
+			m.adminAllowed = msg.Packet.Admin
+			m.slashSelection = 0
+			if !m.adminAllowed {
+				m.clearAdmin()
+			}
+		case "admin_result", "admin_error":
+			m.adminComplete(msg.Packet)
 		case "history":
 			for _, item := range msg.Packet.Messages {
 				m.addMessage(item)
@@ -237,6 +251,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, waitForNetwork(m.events)
 	case tea.KeyPressMsg:
+		if m.page == administrationPage {
+			return m.adminKey(msg)
+		}
 		if m.page == accountPage {
 			return m.accountKey(msg)
 		}
@@ -314,6 +331,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch strings.ToLower(text) {
 			case "/exit":
 				return m, tea.Quit
+			case "/admin":
+				return m.openAdmin()
 			case "/account":
 				m.composer.SetValue("")
 				return m.openAccount()
@@ -378,7 +397,7 @@ func (m Model) slashMenu() ([]slashCommand, bool) {
 	if m.slashDismissed {
 		return nil, false
 	}
-	return slashCandidates(m.composer.Value())
+	return slashCandidatesFor(m.composer.Value(), m.adminAllowed)
 }
 
 // Leave at least two chat lines visible even in a short terminal. Rows are
@@ -475,6 +494,9 @@ func (m Model) chatRows(width int) []string {
 	return rows
 }
 func (m Model) View() tea.View {
+	if m.page == administrationPage {
+		return m.adminView()
+	}
 	if m.page == accountPage {
 		return m.accountView()
 	}
@@ -484,6 +506,9 @@ func (m Model) View() tea.View {
 	rows := m.chatRows(width)
 	if m.help {
 		rows = append(rows, "", brandStyle.Render("Keyboard shortcuts"), labelStyle.Render("Enter   send message"), labelStyle.Render("PgUp    older messages"), labelStyle.Render("PgDn    newer messages"), labelStyle.Render("F1      close help"), labelStyle.Render("F2      install available update"), labelStyle.Render("Ctrl+P  account management"), labelStyle.Render("/       command suggestions"), labelStyle.Render("Tab     complete command"), labelStyle.Render("/update check for updates"), labelStyle.Render("/account account management"), labelStyle.Render("/exit   leave Sockt"))
+	}
+	if m.help && m.adminAllowed {
+		rows = append(rows, labelStyle.Render("/admin  server administration"))
 	}
 	h := m.bodyHeight()
 	end := max(0, len(rows)-m.scroll)

@@ -63,6 +63,11 @@ func main() {
 	listen := flags.String("listen", getenv("SOCKT_LISTEN", "127.0.0.1:8080"), "HTTP listen address: loopback IP:port only")
 	importFile := flags.String("file", "data/messages.json", "v0.5 JSON message history to import")
 	_ = flags.Parse(args)
+	if sub == "serve" {
+		if _, err := server.ParseAdminUserID(os.Getenv("SOCKT_ADMIN_USER_ID")); err != nil {
+			log.Fatal(err)
+		}
+	}
 	if *dsn == "" {
 		log.Fatal("DATABASE_URL is required (see .env.example)")
 	}
@@ -109,7 +114,10 @@ func main() {
 		if err := safeListen(*listen); err != nil {
 			log.Fatal(err)
 		}
-		sockt := server.New(db, log.Default())
+		sockt, err := server.NewWithAdmin(db, log.Default(), os.Getenv("SOCKT_ADMIN_USER_ID"))
+		if err != nil {
+			log.Fatal(err)
+		}
 		mux := http.NewServeMux()
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodGet {
@@ -139,7 +147,7 @@ func main() {
 			sockt.Shutdown() // Close upgraded chat clients (HTTP Shutdown alone doesn't).
 		}()
 		log.Printf("socktd %s (%s) WebSocket endpoint ws://%s/ws (PostgreSQL)", buildinfo.Version, buildinfo.Commit, *listen)
-		err := httpSrv.ListenAndServe()
+		err = httpSrv.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
 		}

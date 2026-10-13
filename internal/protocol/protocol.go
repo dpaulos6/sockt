@@ -57,6 +57,11 @@ type SessionInfo struct {
 }
 
 type Packet struct {
+	Admin         bool          `json:"admin,omitempty"`
+	Confirmed     bool          `json:"confirmed,omitempty"`
+	Target        string        `json:"target,omitempty"`
+	Action        string        `json:"action,omitempty"`
+	AdminStatus   *AdminStatus  `json:"admin_status,omitempty"`
 	Version       int           `json:"version,omitempty"`
 	Type          string        `json:"type"`
 	Username      string        `json:"username,omitempty"`
@@ -75,6 +80,15 @@ type Packet struct {
 	Message       *Message      `json:"message,omitempty"`
 	Messages      []Message     `json:"messages,omitempty"`
 	Users         []string      `json:"users,omitempty"`
+}
+
+// AdminStatus contains public operational metadata, never credentials.
+type AdminStatus struct {
+	Version       string `json:"version"`
+	Commit        string `json:"commit"`
+	UptimeSeconds int64  `json:"uptime_seconds"`
+	Connections   int    `json:"connections"`
+	Accounts      int64  `json:"accounts"`
 }
 
 func NewScanner(r io.Reader) *bufio.Scanner {

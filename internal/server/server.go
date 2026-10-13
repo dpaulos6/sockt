@@ -22,10 +22,12 @@ type Server struct {
 	pending         chan struct{}
 	passwordWorkers chan struct{}
 	attempts        *attemptLimiter
+	adminUserID     database.AccountUUID
+	started         time.Time
 }
 
 func New(store Store, logger *log.Logger) *Server {
-	return &Server{hub: newHub(store, logger), logger: logger, pending: make(chan struct{}, 32), passwordWorkers: make(chan struct{}, 3), attempts: newAttemptLimiter()}
+	return &Server{hub: newHub(store, logger), logger: logger, pending: make(chan struct{}, 32), passwordWorkers: make(chan struct{}, 3), attempts: newAttemptLimiter(), started: time.Now()}
 }
 func (s *Server) Shutdown() { s.hub.shutdown() }
 
@@ -215,7 +217,7 @@ func (s *Server) handleClient(conn net.Conn) {
 			return
 		}
 	}
-	if err = protocol.Write(conn, protocol.Packet{Type: "ready", LastID: lastID}); err != nil {
+	if err = protocol.Write(conn, protocol.Packet{Type: "ready", LastID: lastID, Admin: s.isAdmin(ident)}); err != nil {
 		return
 	}
 	_ = conn.SetDeadline(time.Time{})
@@ -230,6 +232,10 @@ func (s *Server) handleClient(conn net.Conn) {
 				s.logger.Printf("read user=%q: %v", ident.Username, readErr)
 			}
 			return
+		}
+		if strings.HasPrefix(packet.Type, "admin_") {
+			s.hub.send(c, s.adminRequest(ident, login.Token, packet))
+			continue
 		}
 		if packet.Type == "ping" || packet.Type == "chat" {
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)

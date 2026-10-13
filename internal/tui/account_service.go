@@ -135,6 +135,7 @@ func (m Model) accountComplete(r accountResult) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if r.signedOut {
+		m.clearAdmin()
 		m.events = nil
 		m.status = "Signed out"
 		a.signedOut = true
@@ -158,6 +159,7 @@ func (m Model) accountComplete(r accountResult) (tea.Model, tea.Cmd) {
 		a.selected = 0
 		a.notice = "Session revoked. The device disconnects on its next heartbeat."
 	case "password":
+		m.clearAdmin()
 		a.screen = overview
 		a.notice = "Password changed. Other devices signed out."
 		m.connection = m.accountService.Connect()

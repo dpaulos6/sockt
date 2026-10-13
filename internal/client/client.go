@@ -80,6 +80,15 @@ func (c *Client) emit(e Event) bool {
 	}
 }
 func (c *Client) SendMessage(text string) error {
+	return c.sendPacket(protocol.Packet{Type: "chat", Text: text})
+}
+
+// SendAdmin uses the existing chat writer; the server authorizes every request.
+func (c *Client) SendAdmin(action, target string, confirmed bool) error {
+	return c.sendPacket(protocol.Packet{Type: action, Target: target, Confirmed: confirmed})
+}
+
+func (c *Client) sendPacket(packet protocol.Packet) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.current == nil {
@@ -90,7 +99,7 @@ func (c *Client) SendMessage(text string) error {
 		return ErrStopped
 	case <-c.current.done:
 		return ErrOffline
-	case c.current.outgoing <- protocol.Packet{Type: "chat", Text: text}:
+	case c.current.outgoing <- packet:
 		return nil
 	default:
 		return ErrQueueFull
@@ -217,6 +226,7 @@ func (c *Client) dial() (*session, []protocol.Packet, bool, error) {
 		case "history":
 			history = append(history, packet)
 		case "ready":
+			history = append(history, packet)
 			if packet.LastID < since {
 				reset = true
 			}

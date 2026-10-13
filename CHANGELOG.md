@@ -1,3 +1,21 @@
+## Unreleased — UUID account identity and administration
+
+- Add migration `003_account_uuid.up.sql`: native PostgreSQL UUIDv4 account
+  identities, one-time backfill, registration default, UNIQUE and NOT NULL.
+- Preserve integer account keys/sequences and all existing foreign keys, accounts,
+  messages, memberships, sessions, recovery codes and invites. No child UUID
+  columns, triggers or contraction; no client configuration or wire-version change.
+- Bind admin capability, per-operation authorization and audit actor identity to
+  the database-authenticated account UUID. Integer `SOCKT_ADMIN_USER_ID` values
+  are rejected; use the canonical lowercase non-nil UUID from the operator lookup.
+- Add confirmed invite creation/revocation and read-only status in `/admin`.
+- **Deployment requires migration approval and a verified backup receipt.** Apply
+  migration 003 before activating the new server; set the UUID admin environment
+  and restart. Executable rollback retains the expanded schema. Do not reverse the
+  migration; confirm the exact previous executable works against it before release.
+  Exact lookup, receipt format, migration flags and rollback requirements are in
+  [ADMIN.md](docs/ADMIN.md#stage-1-migration-and-release-gate).
+
 ## Unreleased — Persistent Account view
 
 - Keep one Bubble Tea application and chat connection across Chat/Account navigation.

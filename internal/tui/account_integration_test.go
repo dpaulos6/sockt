@@ -36,7 +36,7 @@ func TestPersistentAccountWebSocketLifecycle(t *testing.T) {
 			case "login":
 				logins.Add(1)
 				since <- p.SinceID
-				_ = protocol.Write(c, protocol.Packet{Type: "ready", LastID: 8})
+				_ = protocol.Write(c, protocol.Packet{Type: "ready", LastID: 8, Admin: true})
 				_ = protocol.Write(c, protocol.Packet{Type: "message", Message: &protocol.Message{ID: 8, Text: "background"}})
 				for {
 					if _, err := protocol.Read(scanner); err != nil {
@@ -79,6 +79,9 @@ func TestPersistentAccountWebSocketLifecycle(t *testing.T) {
 	for !m.online {
 		consume()
 	}
+	if !m.adminAllowed {
+		t.Fatal("client did not forward ready capability")
+	}
 	m.composer.SetValue("draft")
 	for i := 0; i < 20; i++ {
 		m, _ = keyModel(m, tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
@@ -108,7 +111,7 @@ func TestPersistentAccountWebSocketLifecycle(t *testing.T) {
 	}
 	cmd = m.accountRequest("logout")
 	m = finish(m, cmd)
-	if !m.account.signedOut || store.Snapshot().Token != "" || store.Snapshot().LastSeen != 0 {
+	if m.adminAllowed || !m.account.signedOut || store.Snapshot().Token != "" || store.Snapshot().LastSeen != 0 {
 		t.Fatal("logout did not clear credentials and cursor")
 	}
 }

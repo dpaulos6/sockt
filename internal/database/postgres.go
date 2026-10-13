@@ -34,7 +34,8 @@ const sessionLifetime = 30 * 24 * time.Hour
 const dbTimeout = 5 * time.Second
 
 type Identity struct {
-	ID       int64
+	ID       int64 // Legacy database key, retained for integer foreign keys.
+	UUID     AccountUUID
 	Username string
 }
 
@@ -65,7 +66,7 @@ func (s *Store) Close() error { return s.db.Close() }
 // Operators apply reviewed schema changes with `socktd migrate` first.
 func (s *Store) CheckSchema(ctx context.Context) error {
 	var installed bool
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = '002_accounts.up.sql')`).Scan(&installed)
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = '003_account_uuid.up.sql')`).Scan(&installed)
 	if err != nil {
 		return fmt.Errorf("schema not initialized; run socktd migrate: %w", err)
 	}
@@ -271,10 +272,10 @@ func (s *Store) Authenticate(ctx context.Context, username, session string) (Ide
 	}
 	digest := sha256.Sum256([]byte(session))
 	var id Identity
-	err := s.db.QueryRowContext(ctx, `SELECT users.id,users.username FROM sessions
+	err := s.db.QueryRowContext(ctx, `SELECT users.id,users.account_uuid,users.username FROM sessions
         JOIN users ON users.id=sessions.user_id
         WHERE users.username_key=$1 AND sessions.token_hash=$2 AND sessions.expires_at>now()`,
-		strings.ToLower(username), digest[:]).Scan(&id.ID, &id.Username)
+		strings.ToLower(username), digest[:]).Scan(&id.ID, &id.UUID, &id.Username)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Identity{}, ErrInvalidSession
 	}
